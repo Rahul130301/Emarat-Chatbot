@@ -1,0 +1,12 @@
+agent-framework==1.12.1
+agent-framework-core==1.12.1
+agent-framework-azure-ai==1.0.0rc6
+agent-framework-openai==1.11.0
+openai==2.45.0
+azure-ai-agents==1.2.0b5
+azure-ai-projects==2.3.0
+azure-identity==1.25.3
+pyodbc
+rapidfuzz
+numpy
+python-dotenv==1.2.2
