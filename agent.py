@@ -2,6 +2,7 @@ import os
 from agent_framework import create_harness_agent
 from agent_framework.openai import OpenAIChatClient
 from dotenv import load_dotenv
+from agent_framework import SkillsProvider
 
 from tools import (
     list_tables, get_table_schema, run_sql,
@@ -10,7 +11,7 @@ from tools import (
     get_contract_document,
 )
 
-load_dotenv()
+load_dotenv(override=True)
 
 INSTRUCTIONS = """You are a text-to-SQL and contract-document assistant for a
 client-contracts database (structured sales/contracts data plus full contract
@@ -56,12 +57,13 @@ STRUCTURED MODE:
     errors, read the error and correct the query, then re-validate.
 11. Result interpretation — answer the user's actual question in plain
     language based on the real returned rows. Don't just dump the raw result.
-12. Chart output — if the user's question contains words like "bar chart",
-    "bar graph", or "compare visually", after step 10 call load_skill("bar-chart")
-    and follow its instructions exactly. If the user says "pie chart",
-    "breakdown", "share", "proportion", or "distribution", call
-    load_skill("pie-chart") instead. Always output a plain-English insight
-    after the chart block. Never output both chart types for the same question.
+12. Chart output — after step 10, if the user asked for any kind of chart
+    (bar chart, bar graph, pie chart, breakdown, distribution, share, etc.),
+    follow the chart skill guidance that has been automatically provided to
+    you in your context. The skill specifies the exact output format including
+    the json:chart fenced code block schema — follow it precisely.
+    After the chart block, always write a one-sentence plain-English insight.
+    Never output both chart types for the same question.
 
 DOCUMENT MODE:
 2d. Identify which company/contract the question refers to.
@@ -103,7 +105,12 @@ response. Don't say "I've pulled the results" and defer showing them to a
 later turn — call run_sql (or get_contract_document), then immediately
 include its real output in your answer, in the same turn. If a result is too
 large to show in full, say so explicitly and show a representative sample or
-summary right then — never claim completion without visible proof."""
+summary right then — never claim completion without visible proof.
+
+CRITICAL: You must wrap ALL of your internal reasoning, step-by-step
+planning, and explanations of what you are about to do inside
+<reasoning>...</reasoning> XML tags. ONLY your final conversational answer
+to the user should be output outside of these tags."""
 
 
 def build_agent():
@@ -112,6 +119,12 @@ def build_agent():
         api_key=os.environ["AZURE_OPENAI_API_KEY"],
         azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
         api_version="preview",
+    )
+
+    skills_provider = SkillsProvider.from_paths(
+        skill_paths="./skills",
+        disable_load_skill_approval=True,
+        disable_read_skill_resource_approval=True,
     )
     return create_harness_agent(
         name="Contract Text To SQL",
@@ -122,7 +135,7 @@ def build_agent():
             search_schema, search_example_sql, validate_sql,
             get_contract_document,
         ],
-        skills_paths="./skills",
+        context_providers=[skills_provider],
         agent_instructions=INSTRUCTIONS,
         disable_web_search=True,
         disable_mode=True,

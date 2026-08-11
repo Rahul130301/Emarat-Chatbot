@@ -1,9 +1,65 @@
-.env
-venv/
+# =============================
+# Python
+# =============================
 __pycache__/
-/temp/
-*.pyc
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
 .pytest_cache/
+.ruff_cache/
+
+# =============================
+# Virtual Environment
+# =============================
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# =============================
+# Environment & Secrets
+# =============================
+.env
+.env.*
+!.env.example
+
+# =============================
+# Node / Frontend (React + Vite)
+# =============================
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/.cache/
+node_modules/
+
+# =============================
+# Build artifacts
+# =============================
+*.log
+*.lock
+
+# =============================
+# Database files
+# =============================
+*.db
+*.sqlite
+*.sqlite3
+
+# =============================
+# Agent memory / temp files
+# =============================
 agent-file-memory/
 
 # =============================

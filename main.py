@@ -13,7 +13,7 @@ async def main():
         if not q:
             continue
         try:
-            result = await agent.run(q, session=session)
+            result = await agent.run(q, session=session, options={"store": False})
             print(f"\nAssistant: {result.text}\n")
         except Exception as e:
             print(f"\nAssistant: I can't process that request — it was flagged by the platform's safety system. Please rephrase.\n", e)
