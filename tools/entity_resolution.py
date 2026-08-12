@@ -6,20 +6,21 @@ from pathlib import Path
 from typing import Annotated
 from pydantic import Field
 from agent_framework import tool
-from openai import AzureOpenAI
+from openai import OpenAI
 from db_catalog import get_catalog_connection
 from embedding_utils import embed, embedding_from_json
 from similarity_utils import fuzzy_ratio, cosine_similarity
+from dotenv import load_dotenv
+load_dotenv(override=True)
 
 ALIASES_PATH = Path(__file__).parent / "aliases.json"
 
 FUZZY_ACCEPT = 0.6
 EMBED_ACCEPT = 0.90
 
-chat_client = AzureOpenAI(
-    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+chat_client = OpenAI(
+    base_url=f"{os.environ['AZURE_OPENAI_ENDPOINT'].rstrip('/')}/openai/v1",
     api_key=os.environ["AZURE_OPENAI_API_KEY"],
-    api_version=os.environ["AZURE_OPENAI_API_VERSION"],
 )
 CHAT_DEPLOYMENT = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
 
@@ -53,7 +54,7 @@ def llm_resolve(column_name: str, value: str, candidates: list[str]) -> str | No
         "list, or NONE if it's genuinely ambiguous or doesn't match any of them."
     )
     resp = chat_client.chat.completions.create(
-        model=CHAT_DEPLOYMENT, messages=[{"role": "user", "content": prompt}], temperature=0,
+        model=CHAT_DEPLOYMENT, messages=[{"role": "user", "content": prompt}],
     )
     answer = resp.choices[0].message.content.strip()
     return answer if answer in candidates else None

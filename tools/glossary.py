@@ -1,18 +1,20 @@
 # tools/glossary.py
 import os
 import re
+import time
 from typing import Annotated
 from pydantic import Field
 from agent_framework import tool
-from openai import AzureOpenAI
+from openai import OpenAI
 from db_catalog import get_catalog_connection
 from embedding_utils import embed, embedding_from_json
 from similarity_utils import cosine_similarity
+from dotenv import load_dotenv
+load_dotenv(override=True)
 
-chat_client = AzureOpenAI(
-    azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
+chat_client = OpenAI(
+    base_url=f"{os.environ['AZURE_OPENAI_ENDPOINT'].rstrip('/')}/openai/v1",
     api_key=os.environ["AZURE_OPENAI_API_KEY"],
-    api_version=os.environ["AZURE_OPENAI_API_VERSION"],
 )
 CHAT_DEPLOYMENT = os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
 
@@ -36,9 +38,13 @@ def llm_pick(entry_type: str, phrase: str, candidates: list[tuple[str, str]]) ->
         "Which term (if any) does the phrase clearly refer to? Reply with ONLY the "
         "exact term text from the list above, or NONE if it doesn't clearly match any of them."
     )
-    resp = chat_client.chat.completions.create(
-        model=CHAT_DEPLOYMENT, messages=[{"role": "user", "content": prompt}], temperature=0,
-    )
+    t0 = time.time()
+    try:
+        resp = chat_client.chat.completions.create(
+            model=CHAT_DEPLOYMENT, messages=[{"role": "user", "content": prompt}],
+        )
+    except Exception as e:
+        raise
     answer = resp.choices[0].message.content.strip()
     matches = [d for t, d in candidates if t == answer]
     return matches[0] if matches else None
@@ -67,7 +73,12 @@ def _lookup(entry_type: str, phrase: str) -> str:
     all_rows = cur.fetchall()
     conn.close()
 
-    query_vec = embed(phrase)
+    t0 = time.time()
+    try:
+        query_vec = embed(phrase)
+    except Exception as e:
+        raise
+
     scored = []
     for term, definition, emb_json in all_rows:
         if emb_json:
