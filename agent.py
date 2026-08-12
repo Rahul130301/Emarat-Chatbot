@@ -109,8 +109,9 @@ summary right then — never claim completion without visible proof.
 
 CRITICAL: You must wrap ALL of your internal reasoning, step-by-step
 planning, and explanations of what you are about to do inside
-<reasoning>...</reasoning> XML tags. ONLY your final conversational answer
-to the user should be output outside of these tags."""
+<reasoning>...</reasoning> XML tags. You MUST CLOSE the tag with </reasoning> before outputting your final answer!
+Think OUT LOUD extensively in your reasoning tags before EACH tool call you make. Explain WHY you are calling the tool, what you expect to find, and how it helps answer the question. Do not just silently call tools.
+ONLY your final conversational answer to the user should be output outside of these tags."""
 
 
 def build_agent():

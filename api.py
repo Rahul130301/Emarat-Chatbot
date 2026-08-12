@@ -1,4 +1,5 @@
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import time
@@ -79,11 +80,37 @@ async def chat(req: ChatRequest):
         return {"response": "Agent not initialized."}
         
     try:
-        result = await agent.run(req.message, session=session_data["obj"])
-        print(f"\n=== AGENT RESPONSE ===\n{result.text}\n=== END RESPONSE ===\n")
-        return {"response": result.text}
+        async def event_generator():
+            try:
+                # Iterate over the agent stream which yields AgentResponseUpdate chunks
+                stream = await agent.run(req.message, session=session_data["obj"], stream=True)
+                async for update in stream:
+                    import json
+
+                    if hasattr(update, 'contents') and update.contents:
+                        for content in update.contents:
+                            if content.type in ["function_call", "mcp_server_tool_call"]:
+                                name = getattr(content, "name", None) or getattr(content, "tool_name", None)
+                                if name:
+                                    yield f"data: {json.dumps({'text': f'<reasoning><tool_call name=\"{name}\" /></reasoning>'})}\n\n"
+
+                    # Extract the text delta and format as Server-Sent Event (SSE)
+                    if hasattr(update, 'text') and update.text:
+                        # Clean out newlines and escape backslashes to ensure safe JSON-like encoding for the text field
+                        text = update.text
+                        import json
+                        yield f"data: {json.dumps({'text': text})}\n\n"
+            except Exception as inner_e:
+                print(f"Error during streaming: {inner_e}")
+                import json
+                yield f"data: {json.dumps({'error': 'An error occurred while streaming the response.'})}\n\n"
+            
+            # Send completion event
+            yield "data: [DONE]\n\n"
+            
+        return StreamingResponse(event_generator(), media_type="text/event-stream")
     except Exception as e:
-        print(f"Error during agent run: {e}")
+        print(f"Error initializing stream: {e}")
         return {"response": "An error occurred while processing the request."}
 
 if __name__ == "__main__":

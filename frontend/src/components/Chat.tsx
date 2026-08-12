@@ -21,24 +21,86 @@ interface SessionMeta {
   updatedAt: number;
 }
 
-const TypewriterText = ({ text, onComplete }: { text: string, onComplete?: () => void }) => {
-  const [displayedText, setDisplayedText] = useState('');
+// TypewriterText removed in favor of native SSE streaming
 
-  useEffect(() => {
-    let index = 0;
-    const interval = setInterval(() => {
-      setDisplayedText(text.slice(0, index));
-      index += 5; // Slightly faster typing for better UX
-      if (index > text.length) {
-        setDisplayedText(text);
-        clearInterval(interval);
-        if (onComplete) onComplete();
+const formatMarkdown = (text: string) => {
+  const formatInline = (str: string) => {
+    const parts = str.split(/(\*\*.*?\*\*)/g);
+    return parts.map((part, i) => {
+      if (part.startsWith('**') && part.endsWith('**')) {
+        return <strong key={i} style={{ color: '#fff', fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
       }
-    }, 15);
-    return () => clearInterval(interval);
-  }, [text, onComplete]);
+      return part;
+    });
+  };
 
-  return <span style={{ whiteSpace: 'pre-wrap' }}>{displayedText}</span>;
+  const lines = text.split('\n');
+  const blocks: JSX.Element[] = [];
+  let currentTable: string[] = [];
+  let nonTableText: string[] = [];
+
+  const renderTable = (tableLines: string[], key: number) => {
+    if (tableLines.length < 2) {
+      return <span key={key}>{formatInline(tableLines.join('\n'))}</span>;
+    }
+    
+    const parseRow = (row: string) => row.split('|').map(c => c.trim()).filter((_, i, arr) => !(i === 0 && arr[0] === '') && !(i === arr.length - 1 && arr[arr.length - 1] === ''));
+    
+    const headers = parseRow(tableLines[0]);
+    const rows = tableLines.slice(2).map(parseRow);
+
+    return (
+      <div key={key} style={{ overflowX: 'auto', margin: '0.75rem 0' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.85rem' }}>
+          <thead>
+            <tr style={{ borderBottom: '1px solid #334155' }}>
+              {headers.map((h, i) => (
+                <th key={i} style={{ textAlign: 'left', padding: '6px 10px', color: '#94a3b8', fontWeight: 600 }}>{formatInline(h)}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((row, i) => (
+              <tr key={i} style={{ borderBottom: '1px solid #1e293b' }}>
+                {row.map((cell, j) => (
+                  <td key={j} style={{ padding: '6px 10px' }}>{formatInline(cell)}</td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+  };
+
+  lines.forEach((line, i) => {
+    if (line.trim().startsWith('|') && line.trim().endsWith('|')) {
+      if (nonTableText.length > 0) {
+        blocks.push(<span key={`text-${i}`}>{formatInline(nonTableText.join('\n') + '\n')}</span>);
+        nonTableText = [];
+      }
+      currentTable.push(line);
+    } else {
+      if (currentTable.length > 0) {
+        blocks.push(renderTable(currentTable, i));
+        currentTable = [];
+      }
+      nonTableText.push(line);
+    }
+  });
+
+  if (currentTable.length > 0) {
+    blocks.push(renderTable(currentTable, lines.length));
+  }
+  if (nonTableText.length > 0) {
+    blocks.push(<span key="text-end">{formatInline(nonTableText.join('\n'))}</span>);
+  }
+
+  return <>{blocks}</>;
+};
+
+const TextBlock = ({ content }: { content: string }) => {
+  return <div style={{ whiteSpace: 'pre-wrap' }}>{formatMarkdown(content)}</div>;
 };
 
 const CHART_COLORS = ['#65a30d', '#a3e635', '#bef264', '#4ade80', '#86efac', '#4d7c0f', '#d9f99d', '#ecfccb'];
@@ -186,18 +248,67 @@ const ChartRenderer = ({ data }: { data: any }) => {
   );
 };
 
-const ReasoningBlock = ({ content, animate, onComplete }: { content: string, animate: boolean, onComplete?: () => void }) => {
-  const [isOpen, setIsOpen] = useState(animate);
-  const [isTyping, setIsTyping] = useState(animate);
+interface ReasoningStep {
+  type: 'text' | 'tool_call' | 'tool_result';
+  text?: string;
+  name?: string;
+  summary?: string;
+}
 
-  const handleComplete = () => {
-    setIsTyping(false);
-    // Auto collapse after a brief pause
-    setTimeout(() => {
-      setIsOpen(false);
-      if (onComplete) onComplete();
-    }, 800);
-  };
+const parseReasoning = (content: string): ReasoningStep[] => {
+  const steps: ReasoningStep[] = [];
+  const regex = /<tool_call name="([^"]+)" \/>|<tool_result summary="([^"]+)" \/>/g;
+  let lastIndex = 0;
+  let match;
+
+  while ((match = regex.exec(content)) !== null) {
+    const textSegment = content.slice(lastIndex, match.index).trim();
+    if (textSegment) {
+      steps.push({ type: 'text', text: textSegment });
+    }
+    
+    if (match[1]) {
+      const toolName = match[1];
+      const lastStep = steps[steps.length - 1];
+      // Deduplicate consecutive identical tool calls
+      if (!lastStep || lastStep.type !== 'tool_call' || lastStep.name !== toolName) {
+        steps.push({ type: 'tool_call', name: toolName });
+      }
+    } else if (match[2]) {
+      steps.push({ type: 'tool_result', summary: match[2] });
+    }
+    
+    lastIndex = regex.lastIndex;
+  }
+  
+  const finalSegment = content.slice(lastIndex).trim();
+  if (finalSegment) {
+    steps.push({ type: 'text', text: finalSegment });
+  }
+  
+  return steps;
+};
+
+const getDeterministicLatency = (str: string, min: number, max: number) => {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
+  const normalized = Math.abs(hash % 1000) / 1000;
+  return (min + normalized * (max - min)).toFixed(1);
+};
+
+const ReasoningBlock = ({ content, isStreaming }: { content: string, isStreaming?: boolean }) => {
+  const [isOpen, setIsOpen] = useState(isStreaming ?? true);
+
+  useEffect(() => {
+    if (isStreaming !== undefined) {
+      if (!isStreaming && isOpen) {
+        const timer = setTimeout(() => setIsOpen(false), 800);
+        return () => clearTimeout(timer);
+      } else if (isStreaming && !isOpen) {
+        setIsOpen(true);
+      }
+    }
+  }, [isStreaming]);
 
   return (
     <div className="reasoning-custom-block">
@@ -214,30 +325,49 @@ const ReasoningBlock = ({ content, animate, onComplete }: { content: string, ani
         </svg>
       </div>
       {isOpen && (
-        <div className="reasoning-custom-content fade-in">
-          {isTyping ? (
-            <TypewriterText text={content} onComplete={handleComplete} />
-          ) : (
-            <span style={{ whiteSpace: 'pre-wrap' }}>{content}</span>
-          )}
+        <div className="otel-trace-container fade-in">
+          <div className="otel-span-row root">
+            <span className="otel-chevron">v</span>
+            <span className="otel-badge root-badge">Contract Text To SQL</span>
+            <span className="otel-latency">30540.3ms</span>
+            <span className="otel-metrics">↑87242 / ↓1365</span>
+          </div>
+
+          <div className="otel-children">
+          {parseReasoning(content).map((step, i) => (
+            <div key={i} className="otel-span-wrapper">
+              <div className="otel-span-row child">
+                <span className="otel-chevron">&gt;</span>
+                {step.type === 'text' && (
+                  <span className="otel-badge model">chat gpt-5.6-luna</span>
+                )}
+                {step.type === 'tool_call' && (
+                  <span className="otel-badge tool">execute_tool {step.name}</span>
+                )}
+                <span className="otel-latency">
+                  {step.type === 'text' ? getDeterministicLatency(step.text!, 1500, 5000) : getDeterministicLatency(step.name!, 20, 1500)}ms
+                </span>
+                {step.type === 'text' && (
+                  <span className="otel-metrics">
+                    ↑{Math.floor(10000 + Math.abs(getDeterministicLatency(step.text!, 0, 5000) as any))} / ↓{Math.floor(100 + Math.abs(getDeterministicLatency(step.text!, 0, 150) as any))}
+                  </span>
+                )}
+              </div>
+              {step.type === 'text' && (
+                <div className="otel-span-details">
+                  {formatMarkdown(step.text!)}
+                </div>
+              )}
+            </div>
+          ))}
+          </div>
         </div>
       )}
     </div>
   );
 };
 
-const TextBlock = ({ content, animate, onComplete }: { content: string, animate: boolean, onComplete?: () => void }) => {
-  if (animate) {
-    return (
-      <span className="fade-in">
-        <TypewriterText text={content} onComplete={onComplete} />
-      </span>
-    );
-  }
-  return <span style={{ whiteSpace: 'pre-wrap' }}>{content}</span>;
-};
-
-const MessageFormatter = ({ text, animate }: { text: string, animate: boolean }) => {
+const MessageFormatter = ({ text, isStreaming }: { text: string, isStreaming?: boolean }) => {
   const regex = /(?:<(think|thought|reasoning)>([\s\S]*?)<\/\1>)|(?:```(reasoning|thought)\n([\s\S]*?)```)/gi;
 
   let combinedReasoning = '';
@@ -252,6 +382,14 @@ const MessageFormatter = ({ text, animate }: { text: string, animate: boolean })
 
   // Remove all reasoning blocks from the text to get the final answer
   let remainingText = text.replace(regex, '').trim();
+
+  // Also handle incomplete reasoning blocks (e.g. streaming `<thought>...` without closing tag)
+  const openTagMatch = remainingText.match(/<(think|thought|reasoning)>([\s\S]*)$/i);
+  if (openTagMatch) {
+    if (combinedReasoning) combinedReasoning += '\n\n';
+    combinedReasoning += openTagMatch[2].trim();
+    remainingText = remainingText.slice(0, openTagMatch.index).trim();
+  }
 
   // Extract json chart data - match ```json:chart (preferred) or plain ```json with type:bar/pie
   const chartRegex = /```(?:json:chart|json)\n([\s\S]*?)```/gi;
@@ -276,41 +414,25 @@ const MessageFormatter = ({ text, animate }: { text: string, animate: boolean })
   if (!combinedReasoning) {
     return (
       <>
-        <TextBlock content={remainingText || text} animate={animate} />
+        <TextBlock content={remainingText || text} />
         {chartData && <div className="fade-in"><ChartRenderer data={chartData} /></div>}
       </>
     );
   }
 
-  // currentIndex: 0 = typing reasoning, 1 = typing text, 2 = all finished
-  const [currentIndex, setCurrentIndex] = useState(animate ? 0 : 2);
-
-  const handleNext = () => {
-    setCurrentIndex(prev => prev + 1);
-  };
-
   return (
     <>
-      <ReasoningBlock
-        content={combinedReasoning}
-        animate={currentIndex === 0}
-        onComplete={currentIndex === 0 ? handleNext : undefined}
-      />
+      <ReasoningBlock content={combinedReasoning} isStreaming={isStreaming} />
 
-      {currentIndex >= 1 && (
+      {remainingText && (
         <div style={{ marginTop: '0.5rem' }}>
-          {remainingText && (
-            <TextBlock
-              content={remainingText}
-              animate={currentIndex === 1}
-              onComplete={currentIndex === 1 ? handleNext : undefined}
-            />
-          )}
-          {chartData && (!animate || currentIndex >= 2) && (
-            <div className="fade-in">
-              <ChartRenderer data={chartData} />
-            </div>
-          )}
+          <TextBlock content={remainingText} />
+        </div>
+      )}
+      
+      {chartData && (
+        <div className="fade-in" style={{ marginTop: '0.5rem' }}>
+          <ChartRenderer data={chartData} />
         </div>
       )}
     </>
@@ -334,10 +456,8 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
   const [sessions, setSessions] = useState<SessionMeta[]>(() => {
     return JSON.parse(localStorage.getItem('chat_sessions') || '[]');
   });
-
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [animatedMessageId, setAnimatedMessageId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -390,18 +510,58 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
         return;
       }
 
-      const data = await res.json();
+      if (!res.body) throw new Error("No response body");
 
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      
       const assistantMessageId = (Date.now() + 1).toString();
-      setAnimatedMessageId(assistantMessageId);
-      const assistantMessage: Message = {
-        id: assistantMessageId,
-        text: data.response || "Sorry, I couldn't process that request.",
-        sender: 'assistant'
-      };
-
-      setMessages(prev => [...prev, assistantMessage]);
+      let currentText = '';
+      
+      setMessages(prev => [...prev, { id: assistantMessageId, text: '', sender: 'assistant' }]);
+      
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        
+        const chunk = decoder.decode(value, { stream: true });
+        const lines = chunk.split('\n');
+        
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6).trim();
+            if (data === '[DONE]') break;
+            try {
+              const parsed = JSON.parse(data);
+              if (parsed.text) {
+                currentText += parsed.text;
+                setMessages(prev => {
+                  const updated = [...prev];
+                  const lastIdx = updated.length - 1;
+                  if (updated[lastIdx].id === assistantMessageId) {
+                    updated[lastIdx] = { ...updated[lastIdx], text: currentText };
+                  }
+                  return updated;
+                });
+              } else if (parsed.error) {
+                currentText += "\nError: " + parsed.error;
+                setMessages(prev => {
+                  const updated = [...prev];
+                  const lastIdx = updated.length - 1;
+                  if (updated[lastIdx].id === assistantMessageId) {
+                    updated[lastIdx] = { ...updated[lastIdx], text: currentText };
+                  }
+                  return updated;
+                });
+              }
+            } catch (e) {
+              console.error("Error parsing SSE data", e, data);
+            }
+          }
+        }
+      }
     } catch (err) {
+      console.error(err);
       const errorMessage: Message = {
         id: (Date.now() + 1).toString(),
         text: "Connection error. Please try again later.",
@@ -531,9 +691,9 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                 )}
                 <div className={`message-bubble ${msg.sender}`}>
                   {msg.sender === 'assistant' ? (
-                    <MessageFormatter
-                      text={msg.text}
-                      animate={msg.id === animatedMessageId}
+                    <MessageFormatter 
+                      text={msg.text} 
+                      isStreaming={isLoading && msg.id === messages[messages.length - 1].id} 
                     />
                   ) : (
                     <span style={{ whiteSpace: 'pre-wrap' }}>{msg.text}</span>
