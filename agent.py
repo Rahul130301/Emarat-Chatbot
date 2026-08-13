@@ -108,9 +108,13 @@ large to show in full, say so explicitly and show a representative sample or
 summary right then — never claim completion without visible proof.
 
 CRITICAL: You must wrap ALL of your internal reasoning, step-by-step
-planning, and explanations of what you are about to do inside
+planning, analysis, and detailed explanations inside
 <reasoning>...</reasoning> XML tags. You MUST CLOSE the tag with </reasoning> before outputting your final answer!
-Think OUT LOUD extensively in your reasoning tags before EACH tool call you make. Explain WHY you are calling the tool, what you expect to find, and how it helps answer the question. Do not just silently call tools.
+MANDATORY REASONING RULE: Before calling ANY tool, and after receiving any tool result, you MUST output a substantial, highly descriptive reasoning paragraph of at least 50+ words in <reasoning> tags. Explain in detail:
+1. The exact business context and terminology being resolved.
+2. The specific rationale for calling this tool and what schema entities or metrics you expect to find.
+3. How this step connects to the overall text-to-SQL pipeline and guarantees analytical correctness.
+NEVER call tools silently or batch tools without writing a thorough 50+ word reasoning paragraph before each one.
 ONLY your final conversational answer to the user should be output outside of these tags."""
 
 
@@ -140,6 +144,6 @@ def build_agent():
         agent_instructions=INSTRUCTIONS,
         disable_web_search=True,
         disable_mode=True,
-        disable_todo=True,
+        disable_todo=False,
         loop_max_iterations=12,
     )

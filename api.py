@@ -10,6 +10,7 @@ import os
 # Ensure the current directory is in sys.path so we can import from agent
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from agent import build_agent
+from agent_framework._harness._todo import TodoSessionStore
 
 app = FastAPI()
 
@@ -92,7 +93,27 @@ async def chat(req: ChatRequest):
                             if content.type in ["function_call", "mcp_server_tool_call"]:
                                 name = getattr(content, "name", None) or getattr(content, "tool_name", None)
                                 if name:
-                                    yield f"data: {json.dumps({'text': f'<reasoning><tool_call name=\"{name}\" /></reasoning>'})}\n\n"
+                                    yield f"data: {json.dumps({'text': f'<reasoning><tool_call name=\"{name}\" /></reasoning>', 'tool_call': name})}\n\n"
+
+                            # Sync todos on any tool execution
+                            if content.type in ["function_call", "function_result", "mcp_server_tool_call", "mcp_server_tool_result"]:
+                                try:
+                                    todo_store = TodoSessionStore()
+                                    items = await todo_store.load_items(session_data["obj"], source_id="todo")
+                                    if items:
+                                        todos = [
+                                            {
+                                                "id": item.id,
+                                                "title": item.title,
+                                                "description": item.description,
+                                                "completed": item.completed,
+                                                "reason": item.reason,
+                                            }
+                                            for item in items
+                                        ]
+                                        yield f"data: {json.dumps({'todos': todos})}\n\n"
+                                except Exception:
+                                    pass
 
                     # Extract the text delta and format as Server-Sent Event (SSE)
                     if hasattr(update, 'text') and update.text:
@@ -100,6 +121,25 @@ async def chat(req: ChatRequest):
                         text = update.text
                         import json
                         yield f"data: {json.dumps({'text': text})}\n\n"
+
+                # Final sync of todos at completion of stream
+                try:
+                    todo_store = TodoSessionStore()
+                    items = await todo_store.load_items(session_data["obj"], source_id="todo")
+                    if items:
+                        todos = [
+                            {
+                                "id": item.id,
+                                "title": item.title,
+                                "description": item.description,
+                                "completed": item.completed,
+                                "reason": item.reason,
+                            }
+                            for item in items
+                        ]
+                        yield f"data: {json.dumps({'todos': todos})}\n\n"
+                except Exception:
+                    pass
             except Exception as inner_e:
                 print(f"Error during streaming: {inner_e}")
                 import json

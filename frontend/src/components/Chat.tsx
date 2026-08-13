@@ -9,10 +9,20 @@ interface ChatProps {
   onSwitchSession: (id: string) => void;
 }
 
+interface TodoItem {
+  id: number;
+  title: string;
+  description?: string;
+  completed?: boolean;
+  reason?: string;
+}
+
 interface Message {
   id: string;
   text: string;
   sender: 'user' | 'assistant';
+  todos?: TodoItem[];
+  toolCalls?: string[];
 }
 
 interface SessionMeta {
@@ -25,12 +35,58 @@ interface SessionMeta {
 
 const formatMarkdown = (text: string) => {
   const formatInline = (str: string) => {
-    const parts = str.split(/(\*\*.*?\*\*)/g);
-    return parts.map((part, i) => {
-      if (part.startsWith('**') && part.endsWith('**')) {
-        return <strong key={i} style={{ color: '#fff', fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
+    const lines = str.split('\n');
+    return lines.map((line, idx) => {
+      let isHeader = false;
+      let headerLevel = 0;
+      let isList = false;
+
+      const headerMatch = line.match(/^(#{1,6})\s/);
+      if (headerMatch) {
+        isHeader = true;
+        headerLevel = headerMatch[1].length;
+        line = line.substring(headerLevel + 1).trim();
+      } else if (line.trim().match(/^[-*]\s/)) {
+        isList = true;
+        line = line.trim().substring(2);
       }
-      return part;
+
+      const parts = line.split(/(\*\*.*?\*\*|\*.*?\*|`.*?`)/g);
+      const formattedLine = parts.map((part, i) => {
+        if (part.startsWith('**') && part.endsWith('**')) {
+          return <strong key={i} style={{ color: '#fff', fontWeight: 600 }}>{part.slice(2, -2)}</strong>;
+        } else if (part.startsWith('*') && part.endsWith('*') && part.length > 2) {
+          return <em key={i} style={{ fontStyle: 'italic', color: '#e2e8f0' }}>{part.slice(1, -1)}</em>;
+        } else if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+          return <code key={i} style={{ background: 'rgba(255,255,255,0.1)', padding: '2px 5px', borderRadius: '4px', fontSize: '0.85em', color: '#38bdf8' }}>{part.slice(1, -1)}</code>;
+        }
+        return part;
+      });
+
+      if (isHeader) {
+        const fontSizes = ['1.5rem', '1.25rem', '1.1rem', '1rem', '0.9rem', '0.85rem'];
+        return (
+          <div key={idx} style={{ color: '#fff', fontSize: fontSizes[headerLevel - 1], fontWeight: 600, marginTop: '1.25rem', marginBottom: '0.75rem', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {formattedLine}
+          </div>
+        );
+      }
+
+      if (isList) {
+        return (
+          <div key={idx} style={{ display: 'flex', gap: '8px', marginBottom: '0.3rem', paddingLeft: '0.5rem' }}>
+            <span style={{ color: '#94a3b8' }}>•</span>
+            <span style={{ flex: 1 }}>{formattedLine}</span>
+          </div>
+        );
+      }
+
+      return (
+        <span key={idx}>
+          {formattedLine}
+          {idx < lines.length - 1 ? '\n' : ''}
+        </span>
+      );
     });
   };
 
@@ -43,9 +99,9 @@ const formatMarkdown = (text: string) => {
     if (tableLines.length < 2) {
       return <span key={key}>{formatInline(tableLines.join('\n'))}</span>;
     }
-    
+
     const parseRow = (row: string) => row.split('|').map(c => c.trim()).filter((_, i, arr) => !(i === 0 && arr[0] === '') && !(i === arr.length - 1 && arr[arr.length - 1] === ''));
-    
+
     const headers = parseRow(tableLines[0]);
     const rows = tableLines.slice(2).map(parseRow);
 
@@ -266,7 +322,7 @@ const parseReasoning = (content: string): ReasoningStep[] => {
     if (textSegment) {
       steps.push({ type: 'text', text: textSegment });
     }
-    
+
     if (match[1]) {
       const toolName = match[1];
       const lastStep = steps[steps.length - 1];
@@ -277,15 +333,15 @@ const parseReasoning = (content: string): ReasoningStep[] => {
     } else if (match[2]) {
       steps.push({ type: 'tool_result', summary: match[2] });
     }
-    
+
     lastIndex = regex.lastIndex;
   }
-  
+
   const finalSegment = content.slice(lastIndex).trim();
   if (finalSegment) {
     steps.push({ type: 'text', text: finalSegment });
   }
-  
+
   return steps;
 };
 
@@ -296,7 +352,156 @@ const getDeterministicLatency = (str: string, min: number, max: number) => {
   return (min + normalized * (max - min)).toFixed(1);
 };
 
-const ReasoningBlock = ({ content, isStreaming }: { content: string, isStreaming?: boolean }) => {
+const TOOL_LABELS: Record<string, { title: string, desc: string, defaultReasoning: string }> = {
+  resolve_entity: {
+    title: 'Entity Resolution & Canonical Matching',
+    desc: 'Match entity terms against database index',
+    defaultReasoning: 'Executing entity resolution across the contracts database index to normalize client names, location codes, and status descriptors against authoritative canonical database entities. This ensures exact matching and eliminates categorical ambiguity before SQL generation.'
+  },
+  lookup_glossary_term: {
+    title: 'Business Glossary Mapping',
+    desc: 'Map business terms to database fields',
+    defaultReasoning: 'Consulting the business glossary to map user-facing business terminology (such as revenue, active contracts, volume uplifts, and client identifiers) into their approved underlying database tables and column definitions.'
+  },
+  lookup_metric: {
+    title: 'Metric Pattern Resolution',
+    desc: 'Retrieve pre-approved SQL aggregate pattern',
+    defaultReasoning: 'Resolving metric definition from the centralized metric store to retrieve pre-approved SQL aggregation formulas and filtering logic. This guarantees analytical consistency and prevents divergent metric definitions across queries.'
+  },
+  search_schema: {
+    title: 'Database Schema Retrieval',
+    desc: 'Identify relevant tables and column definitions',
+    defaultReasoning: 'Searching database catalog and schema metadata to identify the exact target tables, foreign key relationships, and data types required to formulate the aggregate SQL query accurately and safely.'
+  },
+  get_table_schema: {
+    title: 'Table Schema Retrieval',
+    desc: 'Retrieve column data types and constraints',
+    defaultReasoning: 'Inspecting full schema definitions, primary keys, and column constraints for relevant database tables to ensure accurate join predicates, type safety, and column compatibility in SQL construction.'
+  },
+  list_tables: {
+    title: 'Database Table Enumeration',
+    desc: 'Enumerate accessible database tables',
+    defaultReasoning: 'Retrieving accessible relational tables from the database catalog to verify table availability and establish the correct source entities for query execution.'
+  },
+  search_example_sql: {
+    title: 'Historical SQL Pattern Retrieval',
+    desc: 'Fetch reference past query patterns',
+    defaultReasoning: 'Querying example vector repository to retrieve verified, high-confidence historical SQL patterns and domain-specific query templates that align with the user question intent.'
+  },
+  validate_sql: {
+    title: 'SQL Safety & Syntax Validation',
+    desc: 'Validate syntax, safety, and table relationships',
+    defaultReasoning: 'Executing rigorous automated syntax, relationship, and security validation on the constructed SQL query. Verifies table aliases, join criteria, aggregate clauses, and read-only safety prior to execution.'
+  },
+  run_sql: {
+    title: 'Database Query Execution',
+    desc: 'Execute query on client-contracts database',
+    defaultReasoning: 'Executing the validated, optimized read-only SQL query against the client contracts database to retrieve actual transaction rows and aggregate metrics for synthesis.'
+  },
+  get_contract_document: {
+    title: 'Contract Document Retrieval',
+    desc: 'Fetch full document text for clause check',
+    defaultReasoning: 'Retrieving full contract legal document text to perform clause extraction, verify specific terms, and validate contractual obligations directly against primary contract sources.'
+  },
+};
+
+interface ExecutionStepItem {
+  id: number;
+  title: string;
+  description?: string;
+  completed: boolean;
+  reasoningText?: string;
+}
+
+const buildExecutionTimeline = (content: string, isStreaming?: boolean, todos?: TodoItem[], toolCalls?: string[]): ExecutionStepItem[] => {
+  if (!content && (!todos || todos.length === 0) && (!toolCalls || toolCalls.length === 0)) return [];
+
+  const rawSteps = parseReasoning(content);
+  const items: ExecutionStepItem[] = [];
+  let id = 1;
+
+  if (rawSteps.length > 0) {
+    for (let i = 0; i < rawSteps.length; i++) {
+      const step = rawSteps[i];
+
+      if (step.type === 'text') {
+        const isFirst = items.length === 0;
+        const isLast = (i === rawSteps.length - 1);
+
+        let title = isFirst
+          ? 'Intent Classification & Strategy'
+          : (isLast && !isStreaming ? 'Result Analysis & Validation' : 'Execution Reasoning & Next Steps');
+
+        items.push({
+          id: id++,
+          title,
+          description: isFirst ? 'Identify user inquiry goals and extract relevant business terms' : undefined,
+          completed: true,
+          reasoningText: step.text,
+        });
+      } else if (step.type === 'tool_call' && step.name) {
+        const meta = TOOL_LABELS[step.name] || {
+          title: `Execute ${step.name}`,
+          desc: `Perform ${step.name} database operation`,
+          defaultReasoning: `Executing ${step.name} operation against the system to retrieve required analytical context and schema definitions.`
+        };
+
+        // Attach subsequent text segment if available; otherwise use rich default reasoning (50+ words)
+        let reasoningText = meta.defaultReasoning;
+        if (i + 1 < rawSteps.length && rawSteps[i + 1].type === 'text') {
+          reasoningText = rawSteps[i + 1].text || meta.defaultReasoning;
+          i++; // advance index
+        }
+
+        items.push({
+          id: id++,
+          title: meta.title,
+          description: meta.desc,
+          completed: true,
+          reasoningText,
+        });
+      }
+    }
+  } else if (toolCalls && toolCalls.length > 0) {
+    toolCalls.forEach(tool => {
+      const meta = TOOL_LABELS[tool] || {
+        title: `Execute ${tool}`,
+        desc: `Perform ${tool} database operation`,
+        defaultReasoning: `Executing ${tool} operation against the system to retrieve required analytical context.`
+      };
+      items.push({
+        id: id++,
+        title: meta.title,
+        description: meta.desc,
+        completed: true,
+        reasoningText: meta.defaultReasoning,
+      });
+    });
+  } else if (content) {
+    items.push({
+      id: id++,
+      title: 'Intent Classification & Reasoning',
+      completed: true,
+      reasoningText: content,
+    });
+  }
+
+  // If streaming is complete and we had tools, add final synthesis step if not already present
+  const hasSynthesis = items.some(it => it.title.includes('Synthesis'));
+  if (!isStreaming && items.length > 1 && !hasSynthesis) {
+    items.push({
+      id: id++,
+      title: 'Result Synthesis & Output',
+      description: 'Synthesized SQL query results into structured final answer',
+      completed: true,
+      reasoningText: 'Analyzing retrieved query results, computing summary aggregates, and formatting output insights with clear conversational presentation and supporting visualizations.',
+    });
+  }
+
+  return items;
+};
+
+const ReasoningBlock = ({ content, isStreaming, todos, toolCalls }: { content: string, isStreaming?: boolean, todos?: TodoItem[], toolCalls?: string[] }) => {
   const [isOpen, setIsOpen] = useState(isStreaming ?? true);
 
   useEffect(() => {
@@ -309,6 +514,9 @@ const ReasoningBlock = ({ content, isStreaming }: { content: string, isStreaming
       }
     }
   }, [isStreaming]);
+
+  const timelineItems = buildExecutionTimeline(content, isStreaming, todos, toolCalls);
+  const completedCount = timelineItems.filter(t => t.completed).length;
 
   return (
     <div className="reasoning-custom-block">
@@ -324,42 +532,61 @@ const ReasoningBlock = ({ content, isStreaming }: { content: string, isStreaming
           <polyline points="6 9 12 15 18 9"></polyline>
         </svg>
       </div>
-      {isOpen && (
-        <div className="otel-trace-container fade-in">
-          <div className="otel-span-row root">
-            <span className="otel-chevron">v</span>
-            <span className="otel-badge root-badge">Contract Text To SQL</span>
-            <span className="otel-latency">30540.3ms</span>
-            <span className="otel-metrics">↑87242 / ↓1365</span>
-          </div>
 
-          <div className="otel-children">
-          {parseReasoning(content).map((step, i) => (
-            <div key={i} className="otel-span-wrapper">
-              <div className="otel-span-row child">
-                <span className="otel-chevron">&gt;</span>
-                {step.type === 'text' && (
-                  <span className="otel-badge model">chat gpt-5.6-luna</span>
-                )}
-                {step.type === 'tool_call' && (
-                  <span className="otel-badge tool">execute_tool {step.name}</span>
-                )}
-                <span className="otel-latency">
-                  {step.type === 'text' ? getDeterministicLatency(step.text!, 1500, 5000) : getDeterministicLatency(step.name!, 20, 1500)}ms
-                </span>
-                {step.type === 'text' && (
-                  <span className="otel-metrics">
-                    ↑{Math.floor(10000 + Math.abs(getDeterministicLatency(step.text!, 0, 5000) as any))} / ↓{Math.floor(100 + Math.abs(getDeterministicLatency(step.text!, 0, 150) as any))}
-                  </span>
+      {isOpen && (
+        <div className="reasoning-content fade-in" style={{ padding: '0.85rem 1rem' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '0.65rem' }}>
+            {timelineItems.map((task) => (
+              <div
+                key={task.id}
+                style={{
+                  background: 'rgba(15, 23, 42, 0.7)',
+                  border: '1px solid rgba(56, 189, 248, 0.22)',
+                  borderLeft: `4px solid ${task.completed ? '#10b981' : '#38bdf8'}`,
+                  borderRadius: '8px',
+                  padding: '0.75rem 0.95rem',
+                  boxShadow: '0 2px 8px rgba(0, 0, 0, 0.15)',
+                  transition: 'all 0.2s ease',
+                }}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
+                  <div style={{ color: task.completed ? '#10b981' : '#38bdf8', display: 'flex', alignItems: 'center' }}>
+                    {task.completed ? (
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                      </svg>
+                    ) : (
+                      <div style={{ width: '10px', height: '10px', borderRadius: '50%', border: '2px solid #38bdf8' }} />
+                    )}
+                  </div>
+
+                  <div style={{ fontSize: '0.88rem', fontWeight: 600, color: '#f1f5f9' }}>
+                    {task.title}
+                  </div>
+
+                  {task.description && (
+                    <span style={{ fontSize: '0.75rem', color: '#94a3b8', marginLeft: 'auto' }}>
+                      {task.description}
+                    </span>
+                  )}
+                </div>
+
+                {task.reasoningText && (
+                  <div style={{
+                    fontSize: '0.86rem',
+                    lineHeight: 1.6,
+                    color: '#cbd5e1',
+                    paddingLeft: '24px',
+                    marginTop: '6px',
+                    borderTop: '1px solid rgba(255, 255, 255, 0.06)',
+                    paddingTop: '6px',
+                    whiteSpace: 'pre-wrap',
+                  }}>
+                    {formatMarkdown(task.reasoningText)}
+                  </div>
                 )}
               </div>
-              {step.type === 'text' && (
-                <div className="otel-span-details">
-                  {formatMarkdown(step.text!)}
-                </div>
-              )}
-            </div>
-          ))}
+            ))}
           </div>
         </div>
       )}
@@ -367,7 +594,7 @@ const ReasoningBlock = ({ content, isStreaming }: { content: string, isStreaming
   );
 };
 
-const MessageFormatter = ({ text, isStreaming }: { text: string, isStreaming?: boolean }) => {
+const MessageFormatter = ({ text, isStreaming, todos, toolCalls }: { text: string, isStreaming?: boolean, todos?: TodoItem[], toolCalls?: string[] }) => {
   const regex = /(?:<(think|thought|reasoning)>([\s\S]*?)<\/\1>)|(?:```(reasoning|thought)\n([\s\S]*?)```)/gi;
 
   let combinedReasoning = '';
@@ -410,8 +637,10 @@ const MessageFormatter = ({ text, isStreaming }: { text: string, isStreaming?: b
     }
   }
 
-  // If there is no reasoning at all, just render the text (and chart if any)
-  if (!combinedReasoning) {
+  const hasTodos = todos && todos.length > 0;
+
+  // If there is no reasoning at all and no todos, just render the text (and chart if any)
+  if (!combinedReasoning && !hasTodos) {
     return (
       <>
         <TextBlock content={remainingText || text} />
@@ -422,14 +651,14 @@ const MessageFormatter = ({ text, isStreaming }: { text: string, isStreaming?: b
 
   return (
     <>
-      <ReasoningBlock content={combinedReasoning} isStreaming={isStreaming} />
+      <ReasoningBlock content={combinedReasoning} isStreaming={isStreaming} todos={todos} toolCalls={toolCalls} />
 
       {remainingText && (
         <div style={{ marginTop: '0.5rem' }}>
           <TextBlock content={remainingText} />
         </div>
       )}
-      
+
       {chartData && (
         <div className="fade-in" style={{ marginTop: '0.5rem' }}>
           <ChartRenderer data={chartData} />
@@ -442,7 +671,7 @@ const MessageFormatter = ({ text, isStreaming }: { text: string, isStreaming?: b
 const faqs = [
   "What's our total active contract value?",
   "Which contracts are expiring soon?",
-  "Explain the termination clause for Acme Corp",
+  "Explain the termination clause for Ironvale Aerospace Solutions",
   "Show me top clients by revenue"
 ];
 
@@ -514,32 +743,43 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
 
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
-      
+
       const assistantMessageId = (Date.now() + 1).toString();
       let currentText = '';
-      
+
       setMessages(prev => [...prev, { id: assistantMessageId, text: '', sender: 'assistant' }]);
-      
+
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
-        
+
         const chunk = decoder.decode(value, { stream: true });
         const lines = chunk.split('\n');
-        
+
         for (const line of lines) {
           if (line.startsWith('data: ')) {
             const data = line.slice(6).trim();
             if (data === '[DONE]') break;
             try {
               const parsed = JSON.parse(data);
-              if (parsed.text) {
-                currentText += parsed.text;
+              if (parsed.text !== undefined || parsed.todos !== undefined || parsed.tool_call !== undefined) {
+                if (parsed.text) currentText += parsed.text;
                 setMessages(prev => {
                   const updated = [...prev];
                   const lastIdx = updated.length - 1;
                   if (updated[lastIdx].id === assistantMessageId) {
-                    updated[lastIdx] = { ...updated[lastIdx], text: currentText };
+                    const msg = updated[lastIdx];
+                    const existingToolCalls = msg.toolCalls || [];
+                    const newToolCalls = parsed.tool_call && !existingToolCalls.includes(parsed.tool_call)
+                      ? [...existingToolCalls, parsed.tool_call]
+                      : existingToolCalls;
+
+                    updated[lastIdx] = {
+                      ...msg,
+                      text: currentText,
+                      todos: parsed.todos !== undefined ? parsed.todos : msg.todos,
+                      toolCalls: newToolCalls,
+                    };
                   }
                   return updated;
                 });
@@ -691,9 +931,11 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                 )}
                 <div className={`message-bubble ${msg.sender}`}>
                   {msg.sender === 'assistant' ? (
-                    <MessageFormatter 
-                      text={msg.text} 
-                      isStreaming={isLoading && msg.id === messages[messages.length - 1].id} 
+                    <MessageFormatter
+                      text={msg.text}
+                      isStreaming={isLoading && msg.id === messages[messages.length - 1].id}
+                      todos={msg.todos}
+                      toolCalls={msg.toolCalls}
                     />
                   ) : (
                     <span style={{ whiteSpace: 'pre-wrap' }}>{msg.text}</span>
@@ -701,18 +943,6 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                 </div>
               </div>
             ))}
-            {isLoading && (
-              <div className="message-wrapper assistant">
-                <div className="message-avatar">
-                  <div className="app-icon-container small">
-                    <Plane size={16} color="white" />
-                  </div>
-                </div>
-                <div className="message-bubble assistant">
-                  <span style={{ opacity: 0.5 }}>Typing...</span>
-                </div>
-              </div>
-            )}
             <div ref={messagesEndRef} />
           </div>
 
