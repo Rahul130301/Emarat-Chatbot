@@ -503,18 +503,7 @@ const buildExecutionTimeline = (content: string, isStreaming?: boolean, todos?: 
 };
 
 const ReasoningBlock = ({ content, isStreaming, todos, toolCalls }: { content: string, isStreaming?: boolean, todos?: TodoItem[], toolCalls?: string[] }) => {
-  const [isOpen, setIsOpen] = useState(isStreaming ?? true);
-
-  useEffect(() => {
-    if (isStreaming !== undefined) {
-      if (!isStreaming && isOpen) {
-        const timer = setTimeout(() => setIsOpen(false), 800);
-        return () => clearTimeout(timer);
-      } else if (isStreaming && !isOpen) {
-        setIsOpen(true);
-      }
-    }
-  }, [isStreaming]);
+  const [isOpen, setIsOpen] = useState(false);
 
   const timelineItems = buildExecutionTimeline(content, isStreaming, todos, toolCalls);
   const completedCount = timelineItems.filter(t => t.completed).length;
