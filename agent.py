@@ -20,6 +20,22 @@ TOOLS = [
     get_contract_document,
 ]
 
+# Fast-mode tool set: drops list_tables (dead weight — never referenced in
+# the pipeline below; search_schema + get_table_schema fully replace it) and
+# search_example_sql (aids SQL *style* consistency, not correctness —
+# validate_sql + exact schema lookup already prevent broken/hallucinated
+# SQL, so dropping it trades a little stylistic consistency for one fewer
+# round trip). lookup_metric is deliberately KEPT — it's what prevents the
+# same named metric (e.g. "total contract value") being computed
+# differently across questions, which is a real accuracy/consistency risk,
+# not just style.
+FAST_TOOLS = [
+    get_table_schema, run_sql,
+    resolve_entity, lookup_glossary_term, lookup_metric,
+    search_schema, validate_sql,
+    get_contract_document,
+]
+
 # ---------------------------------------------------------------------------
 # Shared instructions. Everything that guarantees ACCURACY (entity
 # resolution, schema lookup, validation-before-execution, hybrid document+SQL
@@ -150,14 +166,18 @@ conversational answer. The user sees your tool calls happening but not your
 commentary about them, so the final answer must stand on its own without
 referring back to "the steps above" or "my reasoning".
 
+TOOL AVAILABILITY IN THIS MODE: search_example_sql is not available here —
+skip step 7 (example retrieval) entirely and go straight from step 6
+(metric resolution) to step 8 (SQL generation) using only what steps 3-6
+returned. list_tables is also not available — you were never meant to need
+it; search_schema and get_table_schema fully cover table/column discovery.
+
 SPEED — several of the pipeline's tool calls do not depend on each other's
 output, so issue them together in the SAME turn instead of one at a time:
 - resolve_entity (for every entity), lookup_glossary_term, and search_schema
   never depend on each other — call all of them together in one turn.
 - Once search_schema names the relevant table(s), call get_table_schema for
   all of those tables together in one turn (not one call, wait, next call).
-- lookup_metric and search_example_sql don't depend on each other — call
-  them together too.
 Only validate_sql and run_sql are strictly sequential (validate_sql must
 finish and return VALID before run_sql runs) — never parallelize those two.
 Batching the independent calls does not skip any step or reduce accuracy,
@@ -216,7 +236,7 @@ def build_fast_agent():
     return client.as_agent(
         name="Contract Text To SQL (Fast)",
         instructions=FAST_INSTRUCTIONS,
-        tools=TOOLS,
+        tools=FAST_TOOLS,
         context_providers=[_build_skills_provider()],
         # Let the model issue several independent tool calls in one turn
         # instead of one round-trip per tool — this is the main latency win,
