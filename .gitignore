@@ -9,7 +9,6 @@ __pycache__/
 *.egg
 *.egg-info/
 dist/
-build/
 .eggs/
 .mypy_cache/
 .dmypy.json
@@ -101,3 +100,4 @@ __pycache__/
 .pytest_cache/
 agent-file-memory/
 catalog.db
+.deepeval 
