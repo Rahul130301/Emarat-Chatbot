@@ -10,7 +10,10 @@ import os
 
 # Ensure the current directory is in sys.path so we can import from agent
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from agent import build_reasoning_agent, build_fast_agent
+from db import set_current_database
+from db_catalog import set_current_catalog_path
+from agent import build_reasoning_agent as build_contracts_reasoning_agent, build_fast_agent as build_contracts_fast_agent
+from aviation_agent import build_aviation_reasoning_agent, build_aviation_fast_agent
 from agent_framework._harness._todo import TodoSessionStore
 
 app = FastAPI()
@@ -24,24 +27,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize both agent variants globally.
-#   - reasoning_agent: original harness agent (todo tracking + narrated
-#     <reasoning> before every tool call). Hit by POST /chat.
-#   - fast_agent: plain tool-calling agent, no todo/harness scaffolding, no
-#     narrated reasoning. Hit by POST /chat/fast.
-# Both run the exact same tool pipeline underneath, so accuracy is the same;
-# only latency and how much process is shown to the user differs.
+# Initialize Contracts Agent variants
 try:
-    reasoning_agent = build_reasoning_agent()
+    contracts_reasoning_agent = build_contracts_reasoning_agent()
 except Exception as e:
-    print(f"Warning: Could not build reasoning agent on startup: {e}")
-    reasoning_agent = None
+    print(f"Warning: Could not build contracts reasoning agent on startup: {e}")
+    contracts_reasoning_agent = None
 
 try:
-    fast_agent = build_fast_agent()
+    contracts_fast_agent = build_contracts_fast_agent()
 except Exception as e:
-    print(f"Warning: Could not build fast agent on startup: {e}")
-    fast_agent = None
+    print(f"Warning: Could not build contracts fast agent on startup: {e}")
+    contracts_fast_agent = None
+
+# Initialize Aviation Agent variants
+try:
+    aviation_reasoning_agent = build_aviation_reasoning_agent()
+except Exception as e:
+    print(f"Warning: Could not build aviation reasoning agent on startup: {e}")
+    aviation_reasoning_agent = None
+
+try:
+    aviation_fast_agent = build_aviation_fast_agent()
+except Exception as e:
+    print(f"Warning: Could not build aviation fast agent on startup: {e}")
+    aviation_fast_agent = None
 
 sessions = {}
 SESSION_TIMEOUT = 30 * 60  # 30 minutes
@@ -55,19 +65,18 @@ class LoginRequest(BaseModel):
 class ChatRequest(BaseModel):
     message: str
     session_id: str
+    agent_type: str = "contracts"  # "contracts" or "aviation"
 
 
 @app.post("/login")
 async def login(req: LoginRequest):
     if req.username and req.password:
         session_id = str(uuid.uuid4())
-        # Each conversation gets its own session object per agent variant,
-        # created lazily on first use in _get_session_obj below — a fresh
-        # login shouldn't pay the cost of spinning up both if the user only
-        # ever uses one toggle position.
         sessions[session_id] = {
-            "obj_reasoning": None,
-            "obj_fast": None,
+            "obj_contracts_reasoning": None,
+            "obj_contracts_fast": None,
+            "obj_aviation_reasoning": None,
+            "obj_aviation_fast": None,
             "last_active": time.time(),
         }
         return {"session_id": session_id, "expires_in": SESSION_TIMEOUT}
@@ -107,17 +116,21 @@ def _get_session_obj(session_data: dict, agent, obj_key: str):
     return session_data[obj_key]
 
 
-async def _stream_chat(agent, session_obj, message: str, is_harness: bool):
+async def _stream_chat(agent, session_obj, message: str, is_harness: bool, agent_type: str = "contracts"):
     """Shared SSE generator for both the reasoning and fast agents.
 
     is_harness controls two harness-only behaviors that the plain fast
     agent doesn't have: (1) todo-list syncing, and (2) emitting the
     <reasoning><tool_call .../></reasoning> text markers that the frontend's
-    "Thought process" panel parses. The fast agent still reports which
-    tools it called (via the bare 'tool_call' field) so the frontend can
-    show a lightweight "verified with" chip instead — it just doesn't wrap
-    that into visible reasoning text.
+    "Thought process" panel parses.
     """
+    if agent_type == "aviation":
+        set_current_database(os.environ.get("FABRIC_AVIATION_DATABASE", "aviation-warehouse"))
+        set_current_catalog_path(os.environ.get("AVIATION_CATALOG_DB_PATH", "./aviation_catalog.db"))
+    else:
+        set_current_database(os.environ.get("FABRIC_DATABASE", "contract-warehouse"))
+        set_current_catalog_path(os.environ.get("CATALOG_DB_PATH", "./catalog.db"))
+
     try:
         stream = await agent.run(message, session=session_obj, stream=True)
         async for update in stream:
@@ -192,7 +205,7 @@ def _chat_response(agent, obj_key: str, is_harness: bool, req: ChatRequest):
 
     session_obj = _get_session_obj(session_data, agent, obj_key)
     return StreamingResponse(
-        _stream_chat(agent, session_obj, req.message, is_harness),
+        _stream_chat(agent, session_obj, req.message, is_harness, req.agent_type),
         media_type="text/event-stream",
     )
 
@@ -200,13 +213,17 @@ def _chat_response(agent, obj_key: str, is_harness: bool, req: ChatRequest):
 @app.post("/chat")
 async def chat(req: ChatRequest):
     """Reasoning mode — hit when the frontend's 'Reasoning' toggle is ON."""
-    return _chat_response(reasoning_agent, "obj_reasoning", True, req)
+    if req.agent_type == "aviation":
+        return _chat_response(aviation_reasoning_agent, "obj_aviation_reasoning", True, req)
+    return _chat_response(contracts_reasoning_agent, "obj_contracts_reasoning", True, req)
 
 
 @app.post("/chat/fast")
 async def chat_fast(req: ChatRequest):
     """Fast mode — hit when the frontend's 'Reasoning' toggle is OFF."""
-    return _chat_response(fast_agent, "obj_fast", False, req)
+    if req.agent_type == "aviation":
+        return _chat_response(aviation_fast_agent, "obj_aviation_fast", False, req)
+    return _chat_response(contracts_fast_agent, "obj_contracts_fast", False, req)
 
 
 if __name__ == "__main__":

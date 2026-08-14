@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, LogOut, Plus, PlaneTakeoff, Plane, Fuel, FileText, BarChart2, MessageSquare } from 'lucide-react';
+import { Send, LogOut, Plus, PlaneTakeoff, Plane, Fuel, FileText, BarChart2, MessageSquare, ChevronDown, Layers, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
 
 interface ChatProps {
   sessionId: string;
@@ -29,6 +29,10 @@ interface Message {
 interface SessionMeta {
   id: string;
   title: string;
+  titles?: {
+    contracts?: string;
+    aviation?: string;
+  };
   updatedAt: number;
 }
 
@@ -357,12 +361,12 @@ const TOOL_LABELS: Record<string, { title: string, desc: string, defaultReasonin
   resolve_entity: {
     title: 'Entity Resolution & Canonical Matching',
     desc: 'Match entity terms against database index',
-    defaultReasoning: 'Executing entity resolution across the contracts database index to normalize client names, location codes, and status descriptors against authoritative canonical database entities. This ensures exact matching and eliminates categorical ambiguity before SQL generation.'
+    defaultReasoning: 'Executing entity resolution across the database index to normalize entity names, airline codes, client descriptors, and categories against authoritative canonical database entities. This ensures exact matching and eliminates categorical ambiguity before SQL generation.'
   },
   lookup_glossary_term: {
     title: 'Business Glossary Mapping',
-    desc: 'Map business terms to database fields',
-    defaultReasoning: 'Consulting the business glossary to map user-facing business terminology (such as revenue, active contracts, volume uplifts, and client identifiers) into their approved underlying database tables and column definitions.'
+    desc: 'Map operational terms to database fields',
+    defaultReasoning: 'Consulting the business glossary to map user-facing business and operational terminology into their approved underlying database tables and column definitions.'
   },
   lookup_metric: {
     title: 'Metric Pattern Resolution',
@@ -396,8 +400,8 @@ const TOOL_LABELS: Record<string, { title: string, desc: string, defaultReasonin
   },
   run_sql: {
     title: 'Database Query Execution',
-    desc: 'Execute query on client-contracts database',
-    defaultReasoning: 'Executing the validated, optimized read-only SQL query against the client contracts database to retrieve actual transaction rows and aggregate metrics for synthesis.'
+    desc: 'Execute query on active database warehouse',
+    defaultReasoning: 'Executing the validated, optimized read-only SQL query against the active database warehouse to retrieve actual rows and aggregate metrics for synthesis.'
   },
   get_contract_document: {
     title: 'Contract Document Retrieval',
@@ -593,6 +597,7 @@ const FAST_STATUS_VERBS: Record<string, string> = {
   lookup_metric: 'Retrieving metric definitions',
   search_schema: 'Retrieving schema',
   get_table_schema: 'Reading table structure',
+  list_tables: 'Discovering tables',
   search_example_sql: 'Checking similar queries',
   validate_sql: 'Validating query',
   run_sql: 'Running query',
@@ -636,18 +641,20 @@ const MessageFormatter = ({ text, isStreaming, todos, toolCalls, mode }: { text:
     remainingText = remainingText.slice(0, openTagMatch.index).trim();
   }
 
-  // Extract json chart data - match ```json:chart (preferred) or plain ```json with type:bar/pie
-  const chartRegex = /```(?:json:chart|json)\n([\s\S]*?)```/gi;
+  // Extract json chart data - match ```json:chart, ```json, ```chart, or standalone JSON blocks
   let chartData = null;
+
+  // 1. Try matching code fenced blocks first
+  const fencedChartRegex = /```(?:json:chart|json|chart)?\s*\n?(\{[\s\S]*?\})\s*```/gi;
   let chartMatch;
 
-  while ((chartMatch = chartRegex.exec(remainingText)) !== null) {
+  while ((chartMatch = fencedChartRegex.exec(remainingText)) !== null) {
     try {
       const parsed = JSON.parse(chartMatch[1]);
       if (parsed && (parsed.type === 'bar' || parsed.type === 'pie') && Array.isArray(parsed.data)) {
         chartData = parsed;
-        // Remove the matched block from remainingText
-        remainingText = (remainingText.slice(0, chartMatch.index) + remainingText.slice(chartMatch.index + chartMatch[0].length)).trim();
+        // Strip the entire matched fenced block from remainingText
+        remainingText = remainingText.replace(chartMatch[0], '').trim();
         break;
       }
     } catch (e) {
@@ -655,18 +662,37 @@ const MessageFormatter = ({ text, isStreaming, todos, toolCalls, mode }: { text:
     }
   }
 
-  const hasTodos = todos && todos.length > 0;
+  // 2. If no fenced chart matched, try matching standalone JSON block
+  if (!chartData) {
+    const rawJsonRegex = /(\{[\s\r\n]*"type"[\s\r\n]*:[\s\r\n]*"(?:bar|pie)"[\s\S]*?"data"[\s\r\n]*:[\s\r\n]*\[[\s\S]*?\][\s\r\n]*\})/gi;
+    const rawMatch = rawJsonRegex.exec(remainingText);
+    if (rawMatch) {
+      try {
+        const parsed = JSON.parse(rawMatch[1]);
+        if (parsed && (parsed.type === 'bar' || parsed.type === 'pie') && Array.isArray(parsed.data)) {
+          chartData = parsed;
+          remainingText = remainingText.replace(rawMatch[0], '').trim();
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+  }
 
-  // Fast mode never emits <reasoning> text. While tools are still running
-  // and no answer text has arrived yet, show a rotating status label; once
-  // real text starts streaming in, show that instead — nothing persists
-  // after the fact, no chips, no timeline.
+  // Also clean up any lingering empty code fences like ```json \n ```
+  remainingText = remainingText.replace(/```(?:json:chart|json|chart)?\s*```/gi, '').trim();
+
+  const hasTodos = todos && todos.length > 0;
+  const hasRemainingText = remainingText.length > 0;
+
+  // Fast mode
   if (mode === 'fast') {
-    const showStatus = isStreaming && !(remainingText || text).trim();
+    const showStatus = isStreaming && !hasRemainingText && !chartData;
     return (
       <>
-        {showStatus ? <StatusDots toolCalls={toolCalls} /> : <TextBlock content={remainingText || text} />}
-        {chartData && <div className="fade-in"><ChartRenderer data={chartData} /></div>}
+        {showStatus && <StatusDots toolCalls={toolCalls} />}
+        {hasRemainingText && <TextBlock content={remainingText} />}
+        {chartData && <div className="fade-in" style={{ marginTop: hasRemainingText ? '0.75rem' : '0' }}><ChartRenderer data={chartData} /></div>}
       </>
     );
   }
@@ -675,8 +701,8 @@ const MessageFormatter = ({ text, isStreaming, todos, toolCalls, mode }: { text:
   if (!combinedReasoning && !hasTodos) {
     return (
       <>
-        <TextBlock content={remainingText || text} />
-        {chartData && <div className="fade-in"><ChartRenderer data={chartData} /></div>}
+        {hasRemainingText && <TextBlock content={remainingText} />}
+        {chartData && <div className="fade-in" style={{ marginTop: hasRemainingText ? '0.75rem' : '0' }}><ChartRenderer data={chartData} /></div>}
       </>
     );
   }
@@ -685,14 +711,14 @@ const MessageFormatter = ({ text, isStreaming, todos, toolCalls, mode }: { text:
     <>
       <ReasoningBlock content={combinedReasoning} isStreaming={isStreaming} todos={todos} toolCalls={toolCalls} />
 
-      {remainingText && (
+      {hasRemainingText && (
         <div style={{ marginTop: '0.5rem' }}>
           <TextBlock content={remainingText} />
         </div>
       )}
 
       {chartData && (
-        <div className="fade-in" style={{ marginTop: '0.5rem' }}>
+        <div className="fade-in" style={{ marginTop: hasRemainingText ? '0.75rem' : '0.25rem' }}>
           <ChartRenderer data={chartData} />
         </div>
       )}
@@ -700,18 +726,77 @@ const MessageFormatter = ({ text, isStreaming, todos, toolCalls, mode }: { text:
   );
 };
 
-const faqs = [
-  "What's our total active contract value?",
-  "Which contracts are expiring soon?",
-  "Explain the termination clause for Ironvale Aerospace Solutions",
-  "Show me top clients by revenue"
-];
+type AgentType = 'contracts' | 'aviation';
+
+interface AgentConfig {
+  id: AgentType;
+  name: string;
+  shortName: string;
+  badge: string;
+  tagline: string;
+  welcomeMessage: string;
+  capabilities: { icon: any, label: string }[];
+  faqs: string[];
+}
+
+const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
+  contracts: {
+    id: 'contracts',
+    name: 'Contracts & Sales Intelligence',
+    shortName: 'Contracts Agent',
+    badge: 'CONTRACTS & SALES',
+    tagline: 'CONTRACTS & SALES INTELLIGENCE',
+    welcomeMessage: "Hello! I'm AVT, your Emarat Contracts & Sales intelligence assistant. I'm trained on commercial contracts, client revenue analytics, pricing terms, and legal clauses.\n\nHow can I assist you today?",
+    capabilities: [
+      { icon: FileText, label: 'Commercial contracts' },
+      { icon: BarChart2, label: 'Client revenue analytics' },
+      { icon: Fuel, label: 'Fuel pricing & contract rates' },
+      { icon: PlaneTakeoff, label: 'Deal terms & renewal clauses' },
+      { icon: MessageSquare, label: 'Legal clause search' },
+    ],
+    faqs: [
+      "What's our total active contract value?",
+      "Which contracts are expiring soon?",
+      "Explain the termination clause for Ironvale Aerospace Solutions",
+      "Show me top clients by revenue (Bar Chart)"
+    ],
+  },
+  aviation: {
+    id: 'aviation',
+    name: 'Aviation Operations & Uplift',
+    shortName: 'Aviation Agent',
+    badge: 'AVIATION OPERATIONS',
+    tagline: 'FLIGHT & UPLIFT OPERATIONS',
+    welcomeMessage: "Hello! I'm AVT, your Emarat Aviation Operations assistant. I'm trained on aircraft refueling operations, fuel uplifts (Litres), flight movements, airline consumption, and stand analytics.\n\nHow can I assist you with aviation data today?",
+    capabilities: [
+      { icon: Fuel, label: 'Fuel uplift volumes (Litres)' },
+      { icon: PlaneTakeoff, label: 'Flight movements & schedules' },
+      { icon: Plane, label: 'Airline fleet & aircraft models' },
+      { icon: BarChart2, label: 'Stand utilization & turnaround' },
+      { icon: Layers, label: 'Aircraft tail registration search' },
+    ],
+    faqs: [
+      "What is the total fuel volume uplifted by airline?",
+      "Show fuel volume distribution by Aircraft Type (Bar Chart)",
+      "Which stands handled the highest fuel volume?",
+      "List flights and refueling details for SkyMira Air"
+    ],
+  },
+};
 
 export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwitchSession }: ChatProps) {
+  const [activeAgent, setActiveAgent] = useState<AgentType>(() => {
+    const saved = localStorage.getItem('active_agent_type');
+    return (saved === 'aviation' || saved === 'contracts') ? (saved as AgentType) : 'contracts';
+  });
+  const [isAgentMenuOpen, setIsAgentMenuOpen] = useState(false);
+
+  const currentConfig = AGENT_CONFIGS[activeAgent];
+
   const [messages, setMessages] = useState<Message[]>(() => {
-    const saved = localStorage.getItem(`chat_history_${sessionId}`);
+    const saved = localStorage.getItem(`chat_history_${sessionId}_${activeAgent}`);
     if (saved) return JSON.parse(saved);
-    return [{ id: '1', text: "Hello! I'm AVT, your Emarat Aviation intelligence assistant. I'm trained on jet fuel markets, contract data, uplift operations, and pricing analytics.\n\nHow can I assist you today?", sender: 'assistant' }];
+    return [{ id: '1', text: currentConfig.welcomeMessage, sender: 'assistant' }];
   });
 
   const [sessions, setSessions] = useState<SessionMeta[]>(() => {
@@ -719,6 +804,19 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
   });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(() => {
+    const saved = localStorage.getItem('sidebar_visible');
+    return saved === null ? true : saved === 'true';
+  });
+
+  const toggleSidebar = () => {
+    setIsSidebarVisible(prev => {
+      const next = !prev;
+      localStorage.setItem('sidebar_visible', String(next));
+      return next;
+    });
+  };
+
   const [reasoningMode, setReasoningMode] = useState<boolean>(() => {
     const saved = localStorage.getItem('reasoning_mode');
     return saved === null ? true : saved === 'true';
@@ -737,19 +835,83 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     scrollToBottom();
   }, [messages]);
 
-  useEffect(() => {
-    localStorage.setItem(`chat_history_${sessionId}`, JSON.stringify(messages));
+  const getSessionDisplayTitle = (s: SessionMeta, agent: AgentType): string => {
+    // 1. Direct from s.titles map if stored
+    if (s.titles && s.titles[agent]) {
+      return s.titles[agent]!;
+    }
+    // 2. Check localStorage history for that specific session & agent
+    try {
+      const raw = localStorage.getItem(`chat_history_${s.id}_${agent}`);
+      if (raw) {
+        const hist: Message[] = JSON.parse(raw);
+        const firstUser = hist.find(m => m.sender === 'user');
+        if (firstUser && firstUser.text) {
+          return firstUser.text.slice(0, 30) + (firstUser.text.length > 30 ? '...' : '');
+        }
+      }
+    } catch (e) {}
 
-    // Update title if it's the first user message
-    if (messages.length === 2 && messages[1].sender === 'user') {
-      const title = messages[1].text.slice(0, 30) + (messages[1].text.length > 30 ? '...' : '');
+    // 3. If it's the current active session and current messages have a user message
+    if (s.id === sessionId && activeAgent === agent) {
+      const firstUser = messages.find(m => m.sender === 'user');
+      if (firstUser && firstUser.text) {
+        return firstUser.text.slice(0, 30) + (firstUser.text.length > 30 ? '...' : '');
+      }
+    }
+
+    return 'New Chat';
+  };
+
+  useEffect(() => {
+    localStorage.setItem(`chat_history_${sessionId}_${activeAgent}`, JSON.stringify(messages));
+
+    // Update session title specifically for the current activeAgent
+    const firstUserMsg = messages.find(m => m.sender === 'user');
+    if (firstUserMsg && firstUserMsg.text) {
+      const agentTitle = firstUserMsg.text.slice(0, 30) + (firstUserMsg.text.length > 30 ? '...' : '');
       setSessions(prev => {
-        const updated = prev.map(s => s.id === sessionId ? { ...s, title, updatedAt: Date.now() } : s);
+        const updated = prev.map(s => {
+          if (s.id === sessionId) {
+            const updatedTitles = { ...(s.titles || {}), [activeAgent]: agentTitle };
+            return { ...s, title: agentTitle, titles: updatedTitles, updatedAt: Date.now() };
+          }
+          return s;
+        });
         localStorage.setItem('chat_sessions', JSON.stringify(updated));
         return updated;
       });
     }
-  }, [messages, sessionId]);
+  }, [messages, sessionId, activeAgent]);
+
+  const handleSwitchAgent = (newAgent: AgentType) => {
+    if (newAgent === activeAgent) {
+      setIsAgentMenuOpen(false);
+      return;
+    }
+    // Save current agent's messages
+    localStorage.setItem(`chat_history_${sessionId}_${activeAgent}`, JSON.stringify(messages));
+
+    // Switch active agent
+    setActiveAgent(newAgent);
+    localStorage.setItem('active_agent_type', newAgent);
+    setIsAgentMenuOpen(false);
+
+    // Refresh sessions list from localStorage so titles for newAgent are immediately loaded
+    try {
+      const storedSessions = JSON.parse(localStorage.getItem('chat_sessions') || '[]');
+      setSessions(storedSessions);
+    } catch (e) {}
+
+    // Load new agent's messages
+    const newConfig = AGENT_CONFIGS[newAgent];
+    const savedNew = localStorage.getItem(`chat_history_${sessionId}_${newAgent}`);
+    if (savedNew) {
+      setMessages(JSON.parse(savedNew));
+    } else {
+      setMessages([{ id: '1', text: newConfig.welcomeMessage, sender: 'assistant' }]);
+    }
+  };
 
   const sendMessage = async (textToSend: string) => {
     if (!textToSend.trim()) return;
@@ -766,8 +928,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     setInput('');
     setIsLoading(true);
 
-    // Capture the toggle position at send time so a mid-stream toggle flip
-    // doesn't change which panel this particular response renders with.
+    // Capture the toggle position at send time
     const modeAtSend: 'reasoning' | 'fast' = reasoningMode ? 'reasoning' : 'fast';
     const endpoint = reasoningMode
       ? 'http://localhost:8000/chat'
@@ -777,7 +938,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMessage.text, session_id: sessionId })
+        body: JSON.stringify({ message: userMessage.text, session_id: sessionId, agent_type: activeAgent })
       });
 
       if (res.status === 401) {
@@ -897,25 +1058,49 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
 
       <div className="main-content">
         {/* Sidebar */}
-        <div className="sidebar">
-          <div className="app-card">
-            <div className="app-icon-container">
-              <Plane size={24} color="white" />
+        <div className={`sidebar ${isSidebarVisible ? '' : 'collapsed'}`}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '2.5rem' }}>
+            <div className="app-card" style={{ margin: 0 }}>
+              <div className="app-icon-container">
+                {activeAgent === 'aviation' ? <PlaneTakeoff size={24} color="white" /> : <FileText size={24} color="white" />}
+              </div>
+              <div className="app-info">
+                <h4>AVT</h4>
+                <p>{currentConfig.tagline}</p>
+              </div>
             </div>
-            <div className="app-info">
-              <h4>AVT</h4>
-              <p>AVIATION INTELLIGENCE</p>
-            </div>
+            <button
+              className="sidebar-toggle-btn"
+              onClick={toggleSidebar}
+              title="Hide sidebar"
+              style={{
+                background: 'rgba(255, 255, 255, 0.05)',
+                border: '1px solid rgba(255, 255, 255, 0.1)',
+                color: '#94a3b8',
+                cursor: 'pointer',
+                padding: '6px',
+                borderRadius: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <PanelLeftClose size={18} />
+            </button>
           </div>
 
           <div className="capabilities-section">
             <h3 className="sidebar-title">CAPABILITIES</h3>
             <ul className="capabilities-list">
-              <li><Fuel size={18} /> Jet fuel pricing & trends</li>
-              <li><PlaneTakeoff size={18} /> Uplift operations</li>
-              <li><FileText size={18} /> Contract intelligence</li>
-              <li><BarChart2 size={18} /> Market analytics</li>
-              <li><Plane size={18} /> Flight fuel planning</li>
+              {currentConfig.capabilities.map((cap, i) => {
+                const IconComponent = cap.icon;
+                return (
+                  <li key={i}>
+                    <IconComponent size={18} /> {cap.label}
+                  </li>
+                );
+              })}
             </ul>
           </div>
 
@@ -923,23 +1108,26 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
             <div className="history-section">
               <h3 className="sidebar-title">RECENT CHATS</h3>
               <div className="history-list">
-                {sessions.map(s => (
-                  <button
-                    key={s.id}
-                    className={`history-button ${s.id === sessionId ? 'active' : ''}`}
-                    onClick={() => onSwitchSession(s.id)}
-                  >
-                    <MessageSquare size={16} />
-                    <span>{s.title}</span>
-                  </button>
-                ))}
+                {sessions.map(s => {
+                  const displayTitle = getSessionDisplayTitle(s, activeAgent);
+                  return (
+                    <button
+                      key={s.id}
+                      className={`history-button ${s.id === sessionId ? 'active' : ''}`}
+                      onClick={() => onSwitchSession(s.id)}
+                    >
+                      <MessageSquare size={16} />
+                      <span>{displayTitle}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
 
           <h3 className="sidebar-title" style={{ marginTop: sessions.length > 0 ? '2.5rem' : '0' }}>TRY ASKING</h3>
           <div className="faq-list">
-            {faqs.map((faq, i) => (
+            {currentConfig.faqs.map((faq, i) => (
               <button key={i} className="faq-button" onClick={() => sendMessage(faq)}>
                 {faq}
               </button>
@@ -951,11 +1139,123 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
         <div className="chat-layout">
           <header className="chat-window-header">
             <div className="header-left">
+              {!isSidebarVisible && (
+                <button
+                  className="sidebar-toggle-btn"
+                  onClick={toggleSidebar}
+                  title="Show sidebar"
+                  style={{
+                    background: 'rgba(56, 189, 248, 0.1)',
+                    border: '1px solid rgba(56, 189, 248, 0.3)',
+                    color: '#38bdf8',
+                    cursor: 'pointer',
+                    padding: '6px 8px',
+                    borderRadius: '6px',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    marginRight: '6px',
+                    transition: 'all 0.15s ease',
+                  }}
+                >
+                  <PanelLeftOpen size={18} />
+                </button>
+              )}
               <div className="app-icon-container small">
-                <Plane size={16} color="white" />
+                {activeAgent === 'aviation' ? <PlaneTakeoff size={16} color="white" /> : <FileText size={16} color="white" />}
               </div>
               <div className="header-title-col">
-                <h4>AVT Assistant</h4>
+                {/* Interactive Agent Selector Dropdown */}
+                <div style={{ position: 'relative' }}>
+                  <button
+                    onClick={() => setIsAgentMenuOpen(prev => !prev)}
+                    title="Click to switch intelligence agent"
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '7px',
+                      background: 'rgba(56, 189, 248, 0.1)',
+                      border: '1px solid rgba(56, 189, 248, 0.3)',
+                      borderRadius: '6px',
+                      padding: '3px 9px',
+                      color: '#38bdf8',
+                      cursor: 'pointer',
+                      fontSize: '0.88rem',
+                      fontWeight: 600,
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    <span>{currentConfig.name}</span>
+                    <ChevronDown size={14} style={{ transform: isAgentMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
+                  </button>
+
+                  {isAgentMenuOpen && (
+                    <>
+                      <div
+                        onClick={() => setIsAgentMenuOpen(false)}
+                        style={{ position: 'fixed', inset: 0, zIndex: 190 }}
+                      />
+                      <div style={{
+                        position: 'absolute',
+                        top: '100%',
+                        left: 0,
+                        marginTop: '6px',
+                        background: '#0f172a',
+                        border: '1px solid rgba(56, 189, 248, 0.3)',
+                        borderRadius: '8px',
+                        padding: '5px',
+                        zIndex: 200,
+                        minWidth: '280px',
+                        boxShadow: '0 10px 25px rgba(0,0,0,0.6)'
+                      }}>
+                      <div
+                        onClick={() => handleSwitchAgent('contracts')}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '8px 10px',
+                          borderRadius: '6px',
+                          cursor: 'pointer',
+                          background: activeAgent === 'contracts' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+                          color: activeAgent === 'contracts' ? '#38bdf8' : '#cbd5e1',
+                          fontSize: '0.84rem',
+                          fontWeight: activeAgent === 'contracts' ? 600 : 400
+                        }}
+                      >
+                        <FileText size={16} color={activeAgent === 'contracts' ? '#38bdf8' : '#94a3b8'} />
+                        <div>
+                          <div>Contracts & Sales Intelligence</div>
+                          <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Client contracts, sales, rates & clauses</div>
+                        </div>
+                      </div>
+
+                      <div
+                        onClick={() => handleSwitchAgent('aviation')}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          padding: '8px 10px',
+                          borderRadius: '6px',
+                          cursor: 'pointer',
+                          background: activeAgent === 'aviation' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+                          color: activeAgent === 'aviation' ? '#38bdf8' : '#cbd5e1',
+                          fontSize: '0.84rem',
+                          fontWeight: activeAgent === 'aviation' ? 600 : 400,
+                          marginTop: '2px'
+                        }}
+                      >
+                        <PlaneTakeoff size={16} color={activeAgent === 'aviation' ? '#38bdf8' : '#94a3b8'} />
+                        <div>
+                          <div>Aviation Operations & Uplift</div>
+                          <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Fuel uplifts (Litres), flights, stands & fleet</div>
+                        </div>
+                      </div>
+                    </div>
+                  </>
+                  )}
+                </div>
                 <span className="online-status"><div className="dot"></div> Online</span>
               </div>
             </div>
@@ -988,7 +1288,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                   }} />
                 </span>
               </button>
-              <span className="badge">EMARAT AVIATION</span>
+              <span className="badge">{currentConfig.badge}</span>
               <button className="btn-icon" onClick={onNewChat} title="New Chat"><Plus size={18} /></button>
               <button className="btn-icon" onClick={handleLogoutClick} title="Logout"><LogOut size={18} /></button>
             </div>

@@ -58,11 +58,11 @@ cd frontend
 npm install
 ```
 
-## Build the local catalog
+## Build the local catalogs
 
-`catalog.db` isn't committed — it's generated, and specific to what's
-currently in Fabric. Build it fresh after every clone:
+Catalogs (`catalog.db` and `aviation_catalog.db`) are generated and specific to what's currently in Fabric.
 
+### 1. Build Contracts & Sales Catalog:
 ```bash
 python build/init_catalog_db.py
 python build/build_value_catalog.py --with-embeddings
@@ -71,8 +71,15 @@ python build/build_glossary_catalog.py
 python build/build_example_catalog.py
 ```
 
-Run in this order. Only `build_value_catalog.py` needs a live Fabric
-connection.
+### 2. Build Aviation Operations Catalog:
+```bash
+python build/init_aviation_catalog_db.py
+python build/build_aviation_value_catalog.py
+python build/build_aviation_schema_catalog.py
+python build/build_aviation_glossary_catalog.py
+python build/build_aviation_example_catalog.py
+```
+*(Or run the unified builder: `python build_aviation_catalog.py`)*
 
 ## Run
 

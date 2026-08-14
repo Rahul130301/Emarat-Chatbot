@@ -242,7 +242,10 @@ def build_fast_agent():
         # instead of one round-trip per tool — this is the main latency win,
         # since the tool pipeline itself (steps 1-12 in DOMAIN_INTRO) is
         # unchanged and still runs, so accuracy is unaffected.
-        default_options={"allow_multiple_tool_calls": True},
+        default_options={
+            "allow_multiple_tool_calls": True,
+            "reasoning": {"effort": "low"}
+        },
     )
 
 

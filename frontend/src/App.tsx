@@ -72,11 +72,12 @@ function App() {
     setSessionId(newSessionId);
     localStorage.setItem('chat_session_id', newSessionId);
     localStorage.setItem('chat_last_activity', now.toString());
+    localStorage.setItem('sidebar_visible', 'true');
 
     // Add to sessions registry if not exists
     const sessions = JSON.parse(localStorage.getItem('chat_sessions') || '[]');
     if (!sessions.find((s: any) => s.id === newSessionId)) {
-      sessions.unshift({ id: newSessionId, title: 'New Chat', updatedAt: now });
+      sessions.unshift({ id: newSessionId, title: 'New Chat', titles: {}, updatedAt: now });
       localStorage.setItem('chat_sessions', JSON.stringify(sessions));
     }
   };
@@ -85,9 +86,14 @@ function App() {
     setSessionId(null);
     localStorage.removeItem('chat_session_id');
     localStorage.removeItem('chat_last_activity');
+    localStorage.removeItem('sidebar_visible');
     // Clear all history
     const sessions = JSON.parse(localStorage.getItem('chat_sessions') || '[]');
-    sessions.forEach((s: any) => localStorage.removeItem(`chat_history_${s.id}`));
+    sessions.forEach((s: any) => {
+      localStorage.removeItem(`chat_history_${s.id}`);
+      localStorage.removeItem(`chat_history_${s.id}_contracts`);
+      localStorage.removeItem(`chat_history_${s.id}_aviation`);
+    });
     localStorage.removeItem('chat_sessions');
   };
 

@@ -83,9 +83,9 @@ def _fetch_candidates(column_name: str, table_name: str | None) -> list[tuple]:
 
 @tool(approval_mode="never_require")
 def resolve_entity(
-    column_name: Annotated[str, Field(description="Categorical column to resolve against: 'company_name', 'industry', 'status', 'payment_terms', 'renewal_type', 'product_or_service', or 'sales_region'.")],
-    value: Annotated[str, Field(description="The raw value as the user typed or implied it, e.g. 'acme corp'.")],
-    table_name: Annotated[str | None, Field(description="Which table this column belongs to, when it matters (e.g. 'status' could theoretically appear in multiple tables later). Optional.")] = None,
+    column_name: Annotated[str, Field(description="Categorical column to resolve against (e.g. 'company_name', 'industry', 'status', 'Airline', 'AircraftType', 'Stand', 'Registration', 'FlightNo', 'Location', etc.).")],
+    value: Annotated[str, Field(description="The raw value as the user typed or implied it, e.g. 'acme corp' or 'SkyMira'.")],
+    table_name: Annotated[str | None, Field(description="Which table this column belongs to (optional, e.g. 'contracts', 'sales', 'aviation-uplifts').")] = None,
 ) -> str:
     """Resolve a raw user-typed value to the real canonical value(s) in the database.
     Tries exact match, then known alias, then fuzzy string match, then embedding

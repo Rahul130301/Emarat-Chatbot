@@ -9,11 +9,20 @@ FORBIDDEN_PATTERN = re.compile(
     r"\b(insert|update|delete|drop|alter|truncate|grant|revoke|create)\b", re.IGNORECASE
 )
 
+def _sanitize_query(query: str) -> str:
+    q = query
+    q = re.sub(r'(?i)\bfrom\s+aviation-uplifts\b', 'FROM [dbo].[aviation-uplifts]', q)
+    q = re.sub(r'(?i)\bjoin\s+aviation-uplifts\b', 'JOIN [dbo].[aviation-uplifts]', q)
+    q = re.sub(r'(?i)\bfrom\s+aviation_uplifts(?:_warehouse)?\b', 'FROM [dbo].[aviation-uplifts]', q)
+    q = re.sub(r'(?i)\bjoin\s+aviation_uplifts(?:_warehouse)?\b', 'JOIN [dbo].[aviation-uplifts]', q)
+    return q
+
 @tool(approval_mode="never_require")
 def validate_sql(
     query: Annotated[str, Field(description="The SQL SELECT query to validate before executing it.")],
 ) -> str:
-    stripped = query.strip().rstrip(";")
+    sanitized = _sanitize_query(query)
+    stripped = sanitized.strip().rstrip(";")
 
     if not stripped.lower().startswith("select"):
         return "INVALID: query must start with SELECT."
