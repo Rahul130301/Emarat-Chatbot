@@ -23,6 +23,7 @@ interface Message {
   sender: 'user' | 'assistant';
   todos?: TodoItem[];
   toolCalls?: string[];
+  mode?: 'reasoning' | 'fast';
 }
 
 interface SessionMeta {
@@ -594,7 +595,35 @@ const ReasoningBlock = ({ content, isStreaming, todos, toolCalls }: { content: s
   );
 };
 
-const MessageFormatter = ({ text, isStreaming, todos, toolCalls }: { text: string, isStreaming?: boolean, todos?: TodoItem[], toolCalls?: string[] }) => {
+// Ephemeral rotating status label shown in Fast mode while tools are
+// running (nothing persists once the real answer starts streaming in) —
+// replaces the "Thought process" panel without exposing chips or narration.
+const FAST_STATUS_VERBS: Record<string, string> = {
+  resolve_entity: 'Resolving entities',
+  lookup_glossary_term: 'Mapping business terms',
+  lookup_metric: 'Retrieving metric definitions',
+  search_schema: 'Retrieving schema',
+  get_table_schema: 'Reading table structure',
+  search_example_sql: 'Checking similar queries',
+  validate_sql: 'Validating query',
+  run_sql: 'Running query',
+  get_contract_document: 'Reading document',
+};
+
+const StatusDots = ({ toolCalls }: { toolCalls?: string[] }) => {
+  const last = toolCalls && toolCalls.length > 0 ? toolCalls[toolCalls.length - 1] : null;
+  const label = last ? (FAST_STATUS_VERBS[last] || 'Working') : 'Thinking';
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: '2px', color: '#94a3b8', fontSize: '0.85rem', padding: '2px 0' }}>
+      <span>{label}</span>
+      <span className="status-dots">
+        <span>.</span><span>.</span><span>.</span>
+      </span>
+    </div>
+  );
+};
+
+const MessageFormatter = ({ text, isStreaming, todos, toolCalls, mode }: { text: string, isStreaming?: boolean, todos?: TodoItem[], toolCalls?: string[], mode?: 'reasoning' | 'fast' }) => {
   const regex = /(?:<(think|thought|reasoning)>([\s\S]*?)<\/\1>)|(?:```(reasoning|thought)\n([\s\S]*?)```)/gi;
 
   let combinedReasoning = '';
@@ -638,6 +667,20 @@ const MessageFormatter = ({ text, isStreaming, todos, toolCalls }: { text: strin
   }
 
   const hasTodos = todos && todos.length > 0;
+
+  // Fast mode never emits <reasoning> text. While tools are still running
+  // and no answer text has arrived yet, show a rotating status label; once
+  // real text starts streaming in, show that instead — nothing persists
+  // after the fact, no chips, no timeline.
+  if (mode === 'fast') {
+    const showStatus = isStreaming && !(remainingText || text).trim();
+    return (
+      <>
+        {showStatus ? <StatusDots toolCalls={toolCalls} /> : <TextBlock content={remainingText || text} />}
+        {chartData && <div className="fade-in"><ChartRenderer data={chartData} /></div>}
+      </>
+    );
+  }
 
   // If there is no reasoning at all and no todos, just render the text (and chart if any)
   if (!combinedReasoning && !hasTodos) {
@@ -687,6 +730,14 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
   });
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [reasoningMode, setReasoningMode] = useState<boolean>(() => {
+    const saved = localStorage.getItem('reasoning_mode');
+    return saved === null ? true : saved === 'true';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('reasoning_mode', String(reasoningMode));
+  }, [reasoningMode]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -726,8 +777,15 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     setInput('');
     setIsLoading(true);
 
+    // Capture the toggle position at send time so a mid-stream toggle flip
+    // doesn't change which panel this particular response renders with.
+    const modeAtSend: 'reasoning' | 'fast' = reasoningMode ? 'reasoning' : 'fast';
+    const endpoint = reasoningMode
+      ? 'http://localhost:8000/chat'
+      : 'http://localhost:8000/chat/fast';
+
     try {
-      const res = await fetch('http://localhost:8000/chat', {
+      const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ message: userMessage.text, session_id: sessionId })
@@ -747,7 +805,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
       const assistantMessageId = (Date.now() + 1).toString();
       let currentText = '';
 
-      setMessages(prev => [...prev, { id: assistantMessageId, text: '', sender: 'assistant' }]);
+      setMessages(prev => [...prev, { id: assistantMessageId, text: '', sender: 'assistant', mode: modeAtSend }]);
 
       while (true) {
         const { value, done } = await reader.read();
@@ -913,6 +971,34 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
               </div>
             </div>
             <div className="header-right">
+              <button
+                onClick={() => setReasoningMode(m => !m)}
+                title={reasoningMode ? 'Reasoning mode: shows full step-by-step thought process (slower)' : 'Fast mode: tool-verified answers without narrated reasoning (quicker)'}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: '8px',
+                  background: 'rgba(255,255,255,0.04)',
+                  border: '1px solid var(--border)',
+                  borderRadius: '999px',
+                  padding: '4px 6px 4px 12px',
+                  cursor: 'pointer',
+                }}
+              >
+                <span style={{ fontSize: '0.72rem', fontWeight: 600, color: reasoningMode ? '#f1f5f9' : '#94a3b8' }}>
+                  {reasoningMode ? 'Reasoning' : 'Fast'}
+                </span>
+                <span style={{
+                  position: 'relative', width: '32px', height: '18px', borderRadius: '999px',
+                  background: reasoningMode ? 'var(--primary)' : 'rgba(255,255,255,0.15)',
+                  transition: 'background 0.2s',
+                }}>
+                  <span style={{
+                    position: 'absolute', top: '2px',
+                    left: reasoningMode ? '16px' : '2px',
+                    width: '14px', height: '14px', borderRadius: '50%',
+                    background: '#fff', transition: 'left 0.2s',
+                  }} />
+                </span>
+              </button>
               <span className="badge">EMARAT AVIATION</span>
               <button className="btn-icon" onClick={onNewChat} title="New Chat"><Plus size={18} /></button>
               <button className="btn-icon" onClick={handleLogoutClick} title="Logout"><LogOut size={18} /></button>
@@ -936,6 +1022,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                       isStreaming={isLoading && msg.id === messages[messages.length - 1].id}
                       todos={msg.todos}
                       toolCalls={msg.toolCalls}
+                      mode={msg.mode}
                     />
                   ) : (
                     <span style={{ whiteSpace: 'pre-wrap' }}>{msg.text}</span>
