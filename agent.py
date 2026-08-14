@@ -13,7 +13,21 @@ from tools import (
 
 load_dotenv(override=True)
 
-INSTRUCTIONS = """You are a text-to-SQL and contract-document assistant for a
+TOOLS = [
+    list_tables, get_table_schema, run_sql,
+    resolve_entity, lookup_glossary_term, lookup_metric,
+    search_schema, search_example_sql, validate_sql,
+    get_contract_document,
+]
+
+# ---------------------------------------------------------------------------
+# Shared instructions. Everything that guarantees ACCURACY (entity
+# resolution, schema lookup, validation-before-execution, hybrid document+SQL
+# handling, no-bare-refusal rule, no-false-completion rule) lives here and is
+# identical for both agent variants. Only the "how much of your process do
+# you narrate" directive differs between the two variants below.
+# ---------------------------------------------------------------------------
+DOMAIN_INTRO = """You are a text-to-SQL and contract-document assistant for a
 client-contracts database (structured sales/contracts data plus full contract
 document text). Follow this exactly, do not skip or reorder steps.
 
@@ -105,7 +119,12 @@ response. Don't say "I've pulled the results" and defer showing them to a
 later turn — call run_sql (or get_contract_document), then immediately
 include its real output in your answer, in the same turn. If a result is too
 large to show in full, say so explicitly and show a representative sample or
-summary right then — never claim completion without visible proof.
+summary right then — never claim completion without visible proof."""
+
+# Reasoning variant: forces a visible, verbose <reasoning> narration before
+# every tool call. Slower, but gives the client full auditability of *why*
+# each tool was called. Used by the "Reasoning" toggle in the UI.
+REASONING_DIRECTIVE = """
 
 CRITICAL: You must wrap ALL of your internal reasoning, step-by-step
 planning, analysis, and detailed explanations inside
@@ -117,33 +136,97 @@ MANDATORY REASONING RULE: Before calling ANY tool, and after receiving any tool 
 NEVER call tools silently or batch tools without writing a thorough 50+ word reasoning paragraph before each one.
 ONLY your final conversational answer to the user should be output outside of these tags."""
 
+# Fast variant: same pipeline (steps 1-12 / 2d-6d / 2h-4h above) still runs
+# under the hood via the same tools, so accuracy guarantees are unchanged —
+# it just never narrates any of it. This is what makes it "no reasoning,
+# but still tool-grounded and accurate" rather than a model just guessing.
+FAST_DIRECTIVE = """
 
-def build_agent():
-    client = OpenAIChatClient(
-        model=os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"],
+RESPONSE STYLE — this is the fast, low-latency mode: work through the
+pipeline above silently. Do NOT output any planning text, step-by-step
+narration, or internal reasoning, and do NOT use <reasoning> tags at all —
+just call the tools you need and then reply with only the final, concise,
+conversational answer. The user sees your tool calls happening but not your
+commentary about them, so the final answer must stand on its own without
+referring back to "the steps above" or "my reasoning".
+
+SPEED — several of the pipeline's tool calls do not depend on each other's
+output, so issue them together in the SAME turn instead of one at a time:
+- resolve_entity (for every entity), lookup_glossary_term, and search_schema
+  never depend on each other — call all of them together in one turn.
+- Once search_schema names the relevant table(s), call get_table_schema for
+  all of those tables together in one turn (not one call, wait, next call).
+- lookup_metric and search_example_sql don't depend on each other — call
+  them together too.
+Only validate_sql and run_sql are strictly sequential (validate_sql must
+finish and return VALID before run_sql runs) — never parallelize those two.
+Batching the independent calls does not skip any step or reduce accuracy,
+it only removes the wait between them."""
+
+REASONING_INSTRUCTIONS = DOMAIN_INTRO + REASONING_DIRECTIVE
+FAST_INSTRUCTIONS = DOMAIN_INTRO + FAST_DIRECTIVE
+
+
+def _build_client(deployment_env_var: str = "AZURE_OPENAI_DEPLOYMENT_NAME"):
+    # Optional: if AZURE_OPENAI_FAST_DEPLOYMENT_NAME is set (e.g. to a
+    # smaller/quicker model deployment), build_fast_agent() below will use it
+    # instead of the main deployment for an additional speed boost. If it's
+    # not set, this just falls back to the same deployment as reasoning mode
+    # — nothing breaks if you don't have a second deployment.
+    model = os.environ.get(deployment_env_var) or os.environ["AZURE_OPENAI_DEPLOYMENT_NAME"]
+    return OpenAIChatClient(
+        model=model,
         api_key=os.environ["AZURE_OPENAI_API_KEY"],
         azure_endpoint=os.environ["AZURE_OPENAI_ENDPOINT"],
         api_version="preview",
     )
 
-    skills_provider = SkillsProvider.from_paths(
+
+def _build_skills_provider():
+    return SkillsProvider.from_paths(
         skill_paths="./skills",
         disable_load_skill_approval=True,
         disable_read_skill_resource_approval=True,
     )
+
+
+def build_reasoning_agent():
+    """The original harness agent: forced todo tracking + narrated
+    <reasoning> before/after every tool call. Higher latency, fully
+    auditable — this is what the 'Reasoning' toggle (on) hits."""
     return create_harness_agent(
-        name="Contract Text To SQL",
-        client=client,
-        tools=[
-            list_tables, get_table_schema, run_sql,
-            resolve_entity, lookup_glossary_term, lookup_metric,
-            search_schema, search_example_sql, validate_sql,
-            get_contract_document,
-        ],
-        context_providers=[skills_provider],
-        agent_instructions=INSTRUCTIONS,
+        name="Contract Text To SQL (Reasoning)",
+        client=_build_client(),
+        tools=TOOLS,
+        context_providers=[_build_skills_provider()],
+        agent_instructions=REASONING_INSTRUCTIONS,
         disable_web_search=True,
         disable_mode=True,
         disable_todo=False,
         loop_max_iterations=12,
     )
+
+
+def build_fast_agent():
+    """A plain tool-calling agent (no harness todo/mode scaffolding, no
+    forced reasoning narration). It runs the exact same tool pipeline for
+    accuracy, it just answers directly instead of thinking out loud. This is
+    what the 'Reasoning' toggle (off) hits."""
+    client = _build_client("AZURE_OPENAI_FAST_DEPLOYMENT_NAME")
+    return client.as_agent(
+        name="Contract Text To SQL (Fast)",
+        instructions=FAST_INSTRUCTIONS,
+        tools=TOOLS,
+        context_providers=[_build_skills_provider()],
+        # Let the model issue several independent tool calls in one turn
+        # instead of one round-trip per tool — this is the main latency win,
+        # since the tool pipeline itself (steps 1-12 in DOMAIN_INTRO) is
+        # unchanged and still runs, so accuracy is unaffected.
+        default_options={"allow_multiple_tool_calls": True},
+    )
+
+
+def build_agent(reasoning: bool = True):
+    """Back-compat / convenience entry point. reasoning=True -> harness
+    agent (original behavior), reasoning=False -> fast agent."""
+    return build_reasoning_agent() if reasoning else build_fast_agent()
