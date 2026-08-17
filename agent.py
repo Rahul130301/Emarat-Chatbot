@@ -135,7 +135,20 @@ response. Don't say "I've pulled the results" and defer showing them to a
 later turn — call run_sql (or get_contract_document), then immediately
 include its real output in your answer, in the same turn. If a result is too
 large to show in full, say so explicitly and show a representative sample or
-summary right then — never claim completion without visible proof."""
+summary right then — never claim completion without visible proof.
+
+RESPONSE DEPTH — match how much detail the user wants:
+- Default: keep the final answer clear and concise, with the key numbers and a
+  short takeaway.
+- Elaborate mode: if the user asks for a report, deep dive, analysis,
+  briefing, summary write-up, hidden insights, non-obvious patterns,
+  anomalies, drivers, or anything that implies richer storytelling — answer
+  elaborately. Cover the headline findings, supporting breakdowns,
+  comparisons or trends where the data supports them, and any non-obvious
+  insights or caveats. Structure the answer with short headings or bullets so
+  it reads like a useful report, not a one-line reply. Still ground every
+  claim in the query/document results; do not invent insights the data does
+  not support."""
 
 # Reasoning variant: forces a visible, verbose <reasoning> narration before
 # every tool call. Slower, but gives the client full auditability of *why*
@@ -150,7 +163,13 @@ MANDATORY REASONING RULE: Before calling ANY tool, and after receiving any tool 
 2. The specific rationale for calling this tool and what schema entities or metrics you expect to find.
 3. How this step connects to the overall text-to-SQL pipeline and guarantees analytical correctness.
 NEVER call tools silently or batch tools without writing a thorough 50+ word reasoning paragraph before each one.
-ONLY your final conversational answer to the user should be output outside of these tags."""
+ONLY your final conversational answer to the user should be output outside of these tags.
+
+QUERY BUDGET — keep latency in check:
+- Prefer 3 well-designed run_sql calls that return the rankings/breakdowns you need; hard cap is 5 run_sql calls per user question (validate_sql retries after a failed validation do not count toward this cap).
+- For reports or hidden-insight requests, plan the analysis first, then fetch with fewer richer queries (e.g. GROUP BY with multiple dimensions) instead of many narrow exploratory queries.
+- Once you have enough rows to answer, stop querying and synthesize. Do not keep probing for "one more" cut of the data.
+- HYBRID document checks: after the structured filter, sample at most a few matching contract_ids rather than opening every document when the list is long."""
 
 # Fast variant: same pipeline (steps 1-12 / 2d-6d / 2h-4h above) still runs
 # under the hood via the same tools, so accuracy guarantees are unchanged —
@@ -161,10 +180,11 @@ FAST_DIRECTIVE = """
 RESPONSE STYLE — this is the fast, low-latency mode: work through the
 pipeline above silently. Do NOT output any planning text, step-by-step
 narration, or internal reasoning, and do NOT use <reasoning> tags at all —
-just call the tools you need and then reply with only the final, concise,
-conversational answer. The user sees your tool calls happening but not your
-commentary about them, so the final answer must stand on its own without
-referring back to "the steps above" or "my reasoning".
+just call the tools you need and then reply with only the final conversational
+answer (concise by default; elaborate when RESPONSE DEPTH above applies).
+The user sees your tool calls happening but not your commentary about them,
+so the final answer must stand on its own without referring back to "the
+steps above" or "my reasoning".
 
 TOOL AVAILABILITY IN THIS MODE: search_example_sql is not available here —
 skip step 7 (example retrieval) entirely and go straight from step 6
@@ -223,7 +243,7 @@ def build_reasoning_agent():
         disable_web_search=True,
         disable_mode=True,
         disable_todo=False,
-        loop_max_iterations=12,
+        loop_max_iterations=10,
     )
 
 

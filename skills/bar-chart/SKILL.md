@@ -36,6 +36,7 @@ fenced code block. No text inside the block — raw JSON only.
   "description": "One-line subtitle: what measure, what scope, what filter",
   "x_label": "What the categories represent (e.g. Industry, Company, Month)",
   "y_label": "What the values represent (e.g. Total Contract Value ($), Revenue ($))",
+  "unit": "$",
   "data": [
     { "name": "Category Label", "value": 12345.67 }
   ]
@@ -50,6 +51,10 @@ fenced code block. No text inside the block — raw JSON only.
 - `"value"` → the raw number from the SQL result for that category — a sum,
   count, or average, whatever the question asked for. Never a percentage,
   never pre-scaled.
+- `"unit"` → the actual unit of the values, matching the domain you're in.
+  Use `"$"` for money, `"L"` for litres/fuel volume, `"%"` for a percentage
+  measure, `""` for a plain count. NEVER default to `"$"` for a non-money
+  metric — e.g. aviation fuel volume must use `"unit": "L"`, not `"$"`.
 
 ### Rules
 

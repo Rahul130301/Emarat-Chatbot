@@ -16,20 +16,26 @@ CATALOG_COLUMNS = [
     ("aviation-uplifts", "AircraftType"),
     ("aviation-uplifts", "Stand"),
     ("aviation-uplifts", "Location"),
-    ("aviation-uplifts", "Registration"),
-    ("aviation-uplifts", "FlightNo"),
+    #("aviation-uplifts", "Registration"),
+    #("aviation-uplifts", "FlightNo"),
 ]
 
 # Fallback values from verified sample data if live connection is unavailable during offline build
 FALLBACK_VALUES = {
     ("aviation-uplifts", "Airline"): [
-        "SkyMira Air", "Zenith Arrow", "AeroVanta", "Orion Crest Airways", "NovaBridge Air",
-        "AeroNova", "Solaris Air", "Apex Wings", "Horizon Jet", "QATAR AIRWAYS", "EMIRATES"
+        "NexaJet Airways", "AeroVanta", "SkyMira Air", "VeloAir International",
+        "Orion Crest Airways", "Celestra Aviation", "NovaBridge Air",
+        "Altiora Airways", "Meridian Skies", "Zenith Arrow",
+        "AeroNova", "Solaris Air", "Apex Wings", "Horizon Jet",
+        "QATAR AIRWAYS", "EMIRATES",
     ],
     ("aviation-uplifts", "AircraftType"): [
-        "B787", "A350", "A380", "B777", "A340", "A330", "A320", "B737"
+        "A320", "A321", "B737", "B737 MAX", "A330", "A340",
+        "B767", "B787", "A350", "B777", "A380",
     ],
-    ("aviation-uplifts", "Location"): ["DAP"],
+    ("aviation-uplifts", "Location"): [
+        "DAP", "DCP", "T1", "T2", "T3", "INT", "DOM",
+    ],
     ("aviation-uplifts", "Stand"): [
         "F29P", "A17P", "B42P", "C58P", "F18P", "B22P", "D11P", "C37P", "A09P"
     ],

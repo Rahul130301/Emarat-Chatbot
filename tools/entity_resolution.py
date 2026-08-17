@@ -37,11 +37,23 @@ def load_aliases() -> dict:
 
 def lookup_alias(column_name: str, table_name: str | None, normalized: str) -> str | None:
     aliases = load_aliases()
+
+    def _match(bucket: dict) -> str | None:
+        if not bucket:
+            return None
+        if normalized in bucket:
+            return bucket[normalized]
+        # Alias keys may still contain punctuation (e.g. "a-320"); compare normalized.
+        for key, target in bucket.items():
+            if normalize(key) == normalized:
+                return target
+        return None
+
     if table_name:
-        scoped = aliases.get(f"{table_name}.{column_name}", {})
-        if normalized in scoped:
-            return scoped[normalized]
-    return aliases.get(column_name, {}).get(normalized)
+        hit = _match(aliases.get(f"{table_name}.{column_name}", {}))
+        if hit:
+            return hit
+    return _match(aliases.get(column_name, {}))
 
 
 def llm_resolve(column_name: str, value: str, candidates: list[str]) -> str | None:

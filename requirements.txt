@@ -24,3 +24,5 @@ numpy
 python-dotenv==1.2.2
 fastapi
 uvicorn
+pydantic
+typing_extensions

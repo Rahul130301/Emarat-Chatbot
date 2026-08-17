@@ -166,23 +166,69 @@ const TextBlock = ({ content }: { content: string }) => {
 
 const CHART_COLORS = ['#65a30d', '#a3e635', '#bef264', '#4ade80', '#86efac', '#4d7c0f', '#d9f99d', '#ecfccb'];
 
-const formatVal = (v: number) => {
-  if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(1)}M`;
-  if (v >= 1_000) return `$${(v / 1_000).toFixed(1)}k`;
-  return v.toLocaleString();
+// Pulls a short unit token (e.g. "$", "L", "%", "kg") out of a label/description
+// like "Total Contract Value ($)" or "measured in Litres (L)." — returns undefined
+// if nothing recognizable is found.
+const extractUnit = (...texts: (string | undefined)[]): string | undefined => {
+  for (const text of texts) {
+    if (!text) continue;
+    const matches = [...text.matchAll(/\(([$€£%A-Za-z]{1,6})\)/g)];
+    if (matches.length > 0) return matches[matches.length - 1][1];
+  }
+  return undefined;
 };
 
-const BarChartSVG = ({ data, xLabel, yLabel }: { data: { name: string, value: number }[], xLabel?: string, yLabel?: string }) => {
+// Formats a number for chart axes/tooltips using the metric's actual unit — never
+// assumes currency. `unit` of "$" is prefixed, any other unit (e.g. "L", "%") is
+// suffixed, and no unit at all just shows the plain number.
+const formatVal = (v: number, unit?: string) => {
+  const isCurrency = unit === '$';
+  const abbrev = v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M`
+    : v >= 1_000 ? `${(v / 1_000).toFixed(1)}k`
+    : v.toLocaleString();
+  if (isCurrency) return `$${abbrev}`;
+  if (unit) return `${abbrev} ${unit}`;
+  return abbrev;
+};
+
+const BarChartSVG = ({ data, xLabel, yLabel, unit }: { data: { name: string, value: number }[], xLabel?: string, yLabel?: string, unit?: string }) => {
+  const outerRef = useRef<HTMLDivElement>(null);
   const [tooltip, setTooltip] = useState<{ x: number, y: number, item: any } | null>(null);
   const maxVal = Math.max(...data.map(d => d.value));
-  const barW = Math.max(20, Math.min(60, Math.floor(560 / data.length) - 12));
   const chartH = 200;
   const paddingL = 60;
   const paddingB = 60;
+  const paddingR = 20;
+
+  // Give every bar a fixed, always-readable width instead of squeezing
+  // narrower as more categories are added. With many categories (e.g. a
+  // 24-month trend), the chart's own coordinate space (chartW) grows to fit
+  // them all, and the outer wrapper scrolls horizontally rather than
+  // clipping/overflowing — previously bars were forced into a fixed
+  // 640-unit canvas with `overflow: visible`, so once there were enough
+  // categories that even the 20px floor no longer fit, bars (and the
+  // tooltip) were laid out past x=640 and rendered outside the chart's own
+  // box entirely, bleeding past the card and even the chat bubble.
+  const barW = 28;
+  const barGap = 14;
+  const contentW = data.length * (barW + barGap) - barGap;
+  const chartW = Math.max(560, paddingL + contentW + paddingR);
+  const svgH = chartH + paddingB + 20;
+
+  // Position the tooltip relative to the *visible* (possibly scrollable)
+  // container, using getBoundingClientRect rather than viewport coordinates
+  // — immune to any ancestor transform, and clamped so it can never render
+  // outside the visible chart area even near the right edge.
+  const showTooltip = (e: React.MouseEvent, item: any) => {
+    const rect = outerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    const x = Math.max(0, Math.min(e.clientX - rect.left, rect.width - 150));
+    setTooltip({ x, y: e.clientY - rect.top, item });
+  };
 
   return (
-    <div style={{ position: 'relative' }}>
-      <svg width="100%" viewBox={`0 0 640 ${chartH + paddingB + 20}`} style={{ overflow: 'visible' }}>
+    <div ref={outerRef} style={{ position: 'relative', overflowX: 'auto' }}>
+      <svg width={chartW} height={svgH} viewBox={`0 0 ${chartW} ${svgH}`} style={{ display: 'block' }}>
         {/* Y axis label */}
         {yLabel && <text x="12" y={(chartH + paddingB) / 2} transform={`rotate(-90, 12, ${(chartH + paddingB) / 2})`} textAnchor="middle" fontSize="10" fill="#64748b">{yLabel}</text>}
 
@@ -191,8 +237,8 @@ const BarChartSVG = ({ data, xLabel, yLabel }: { data: { name: string, value: nu
           const y = 10 + chartH * (1 - pct);
           return (
             <g key={pct}>
-              <line x1={paddingL} x2={630} y1={y} y2={y} stroke="#1e293b" strokeWidth="1" />
-              <text x={paddingL - 6} y={y + 4} textAnchor="end" fontSize="9" fill="#64748b">{formatVal(maxVal * pct)}</text>
+              <line x1={paddingL} x2={chartW - paddingR} y1={y} y2={y} stroke="#1e293b" strokeWidth="1" />
+              <text x={paddingL - 6} y={y + 4} textAnchor="end" fontSize="9" fill="#64748b">{formatVal(maxVal * pct, unit)}</text>
             </g>
           );
         })}
@@ -200,11 +246,12 @@ const BarChartSVG = ({ data, xLabel, yLabel }: { data: { name: string, value: nu
         {/* Bars */}
         {data.map((d, i) => {
           const barH = Math.max(2, (d.value / maxVal) * chartH);
-          const x = paddingL + 10 + i * (barW + 12);
+          const x = paddingL + i * (barW + barGap);
           const y = 10 + chartH - barH;
           return (
             <g key={i}
-              onMouseEnter={(e) => setTooltip({ x: e.clientX, y: e.clientY, item: d })}
+              onMouseEnter={(e) => showTooltip(e, d)}
+              onMouseMove={(e) => showTooltip(e, d)}
               onMouseLeave={() => setTooltip(null)}
               style={{ cursor: 'pointer' }}
             >
@@ -224,23 +271,24 @@ const BarChartSVG = ({ data, xLabel, yLabel }: { data: { name: string, value: nu
         })}
 
         {/* X axis */}
-        <line x1={paddingL} x2={630} y1={chartH + 10} y2={chartH + 10} stroke="#334155" strokeWidth="1" />
-        {xLabel && <text x={(paddingL + 630) / 2} y={chartH + paddingB + 14} textAnchor="middle" fontSize="10" fill="#64748b">{xLabel}</text>}
+        <line x1={paddingL} x2={chartW - paddingR} y1={chartH + 10} y2={chartH + 10} stroke="#334155" strokeWidth="1" />
+        {xLabel && <text x={(paddingL + chartW - paddingR) / 2} y={chartH + paddingB + 14} textAnchor="middle" fontSize="10" fill="#64748b">{xLabel}</text>}
       </svg>
       {tooltip && (
         <div style={{
-          position: 'fixed', left: tooltip.x + 12, top: tooltip.y - 36,
+          position: 'absolute', left: tooltip.x + 12, top: tooltip.y - 36,
           background: '#0f172a', border: '1px solid #1e293b', borderRadius: '6px',
-          padding: '6px 10px', color: '#fff', fontSize: '12px', pointerEvents: 'none', zIndex: 999
+          padding: '6px 10px', color: '#fff', fontSize: '12px', pointerEvents: 'none', zIndex: 999, whiteSpace: 'nowrap'
         }}>
-          <strong>{tooltip.item.name}</strong>: {formatVal(tooltip.item.value)}
+          <strong>{tooltip.item.name}</strong>: {formatVal(tooltip.item.value, unit)}
         </div>
       )}
     </div>
   );
 };
 
-const PieChartSVG = ({ data }: { data: { name: string, value: number, percentage?: number }[] }) => {
+const PieChartSVG = ({ data, unit }: { data: { name: string, value: number, percentage?: number }[], unit?: string }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
   const [tooltip, setTooltip] = useState<{ x: number, y: number, item: any } | null>(null);
   const total = data.reduce((s, d) => s + d.value, 0);
   const cx = 130, cy = 110, r = 80, ri = 50;
@@ -259,18 +307,27 @@ const PieChartSVG = ({ data }: { data: { name: string, value: number, percentage
     return { d: `M ${xi1} ${yi1} L ${x1} ${y1} A ${r} ${r} 0 ${large} 1 ${x2} ${y2} L ${xi2} ${yi2} A ${ri} ${ri} 0 ${large} 0 ${xi1} ${yi1} Z`, color: CHART_COLORS[i % CHART_COLORS.length], item: d, pct };
   });
 
+  // See BarChartSVG's showTooltip comment — same fix, container-relative
+  // instead of viewport-fixed, so it's immune to ancestor transforms.
+  const showTooltip = (e: React.MouseEvent, item: any) => {
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setTooltip({ x: e.clientX - rect.left, y: e.clientY - rect.top, item });
+  };
+
   return (
-    <div style={{ position: 'relative', display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
+    <div ref={containerRef} style={{ position: 'relative', display: 'flex', gap: '1rem', alignItems: 'center', flexWrap: 'wrap' }}>
       <svg width="260" height="220" style={{ flexShrink: 0, overflow: 'visible' }}>
         {slices.map((s, i) => (
           <path key={i} d={s.d} fill={s.color} stroke="#0f172a" strokeWidth="2"
             style={{ cursor: 'pointer', transition: 'opacity 0.15s' }}
-            onMouseEnter={(e) => setTooltip({ x: e.clientX, y: e.clientY, item: s.item })}
+            onMouseEnter={(e) => showTooltip(e, s.item)}
+            onMouseMove={(e) => showTooltip(e, s.item)}
             onMouseLeave={() => setTooltip(null)}
           />
         ))}
         <text x={cx} y={cy - 6} textAnchor="middle" fontSize="11" fill="#94a3b8">Total</text>
-        <text x={cx} y={cy + 10} textAnchor="middle" fontSize="13" fontWeight="bold" fill="#fff">{formatVal(total)}</text>
+        <text x={cx} y={cy + 10} textAnchor="middle" fontSize="13" fontWeight="bold" fill="#fff">{formatVal(total, unit)}</text>
       </svg>
       <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', flex: 1, minWidth: '160px' }}>
         {data.map((d, i) => (
@@ -283,11 +340,11 @@ const PieChartSVG = ({ data }: { data: { name: string, value: number, percentage
       </div>
       {tooltip && (
         <div style={{
-          position: 'fixed', left: tooltip.x + 12, top: tooltip.y - 36,
+          position: 'absolute', left: tooltip.x + 12, top: tooltip.y - 36,
           background: '#0f172a', border: '1px solid #1e293b', borderRadius: '6px',
-          padding: '6px 10px', color: '#fff', fontSize: '12px', pointerEvents: 'none', zIndex: 999
+          padding: '6px 10px', color: '#fff', fontSize: '12px', pointerEvents: 'none', zIndex: 999, whiteSpace: 'nowrap'
         }}>
-          <strong>{tooltip.item.name}</strong>: {formatVal(tooltip.item.value)}
+          <strong>{tooltip.item.name}</strong>: {formatVal(tooltip.item.value, unit)}
         </div>
       )}
     </div>
@@ -297,13 +354,18 @@ const PieChartSVG = ({ data }: { data: { name: string, value: number, percentage
 const ChartRenderer = ({ data }: { data: any }) => {
   if (!data || !data.type || !Array.isArray(data.data) || data.data.length === 0) return null;
 
+  // Prefer an explicit "unit" field from the agent; otherwise infer it from the
+  // label/description text (e.g. "(L)", "($)"); default to "$" only as a last
+  // resort so existing money-based charts keep working unchanged.
+  const unit = data.unit || extractUnit(data.y_label, data.description, data.title) || '$';
+
   return (
     <div style={{ width: '100%', background: 'rgba(255,255,255,0.03)', padding: '1rem', borderRadius: '0.75rem', marginTop: '1rem', border: '1px solid var(--border)' }}>
       <h4 style={{ margin: '0 0 0.25rem', color: '#fff', fontSize: '0.95rem', fontWeight: 600 }}>{data.title}</h4>
       {data.description && <p style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', margin: '0 0 1rem' }}>{data.description}</p>}
       {data.type === 'bar'
-        ? <BarChartSVG data={data.data} xLabel={data.x_label} yLabel={data.y_label} />
-        : <PieChartSVG data={data.data} />
+        ? <BarChartSVG data={data.data} xLabel={data.x_label} yLabel={data.y_label} unit={unit} />
+        : <PieChartSVG data={data.data} unit={unit} />
       }
     </div>
   );
@@ -641,87 +703,76 @@ const MessageFormatter = ({ text, isStreaming, todos, toolCalls, mode }: { text:
     remainingText = remainingText.slice(0, openTagMatch.index).trim();
   }
 
-  // Extract json chart data - match ```json:chart, ```json, ```chart, or standalone JSON blocks
-  let chartData = null;
+  // Split the remaining text into an ordered sequence of text/chart segments,
+  // supporting any number of json:chart blocks in a single answer (e.g. a
+  // multi-graph report). Each chart is rendered exactly where it appeared in
+  // the text — right after whatever heading/paragraph preceded it — instead
+  // of every chart being collected and dumped at the very end. Any fenced
+  // block that's chart-shaped JSON or explicitly tagged json:chart/chart is
+  // always removed from the visible text (whether or not it renders), so
+  // broken/duplicate chart JSON never leaks out as raw code.
+  const segments: ({ type: 'text', content: string } | { type: 'chart', data: any })[] = [];
+  const blockRegex = /```(json:chart|json|chart)?\s*\n?([\s\S]*?)```|(\{[\s\r\n]*"type"[\s\r\n]*:[\s\r\n]*"(?:bar|pie)"[\s\S]*?"data"[\s\r\n]*:[\s\r\n]*\[[\s\S]*?\][\s\r\n]*\})/gi;
+  let lastIndex = 0;
+  let blockMatch;
 
-  // 1. Try matching code fenced blocks first
-  const fencedChartRegex = /```(?:json:chart|json|chart)?\s*\n?(\{[\s\S]*?\})\s*```/gi;
-  let chartMatch;
+  while ((blockMatch = blockRegex.exec(remainingText)) !== null) {
+    const isFenced = blockMatch[2] !== undefined;
+    const tag = (blockMatch[1] || '').toLowerCase();
+    const body = (isFenced ? blockMatch[2] : blockMatch[3]).trim();
 
-  while ((chartMatch = fencedChartRegex.exec(remainingText)) !== null) {
+    let parsed: any = null;
     try {
-      const parsed = JSON.parse(chartMatch[1]);
-      if (parsed && (parsed.type === 'bar' || parsed.type === 'pie') && Array.isArray(parsed.data)) {
-        chartData = parsed;
-        // Strip the entire matched fenced block from remainingText
-        remainingText = remainingText.replace(chartMatch[0], '').trim();
-        break;
-      }
+      parsed = JSON.parse(body);
     } catch (e) {
-      // not valid JSON, keep looking
+      // not valid JSON — still removed below if explicitly chart-tagged
     }
-  }
+    const isChartShaped = parsed && (parsed.type === 'bar' || parsed.type === 'pie') && Array.isArray(parsed.data) && parsed.data.length > 0;
+    const isChartTagged = isFenced && (tag === 'json:chart' || tag === 'chart');
 
-  // 2. If no fenced chart matched, try matching standalone JSON block
-  if (!chartData) {
-    const rawJsonRegex = /(\{[\s\r\n]*"type"[\s\r\n]*:[\s\r\n]*"(?:bar|pie)"[\s\S]*?"data"[\s\r\n]*:[\s\r\n]*\[[\s\S]*?\][\s\r\n]*\})/gi;
-    const rawMatch = rawJsonRegex.exec(remainingText);
-    if (rawMatch) {
-      try {
-        const parsed = JSON.parse(rawMatch[1]);
-        if (parsed && (parsed.type === 'bar' || parsed.type === 'pie') && Array.isArray(parsed.data)) {
-          chartData = parsed;
-          remainingText = remainingText.replace(rawMatch[0], '').trim();
-        }
-      } catch (e) {
-        // ignore
+    if (isChartShaped || isChartTagged) {
+      const preceding = remainingText.slice(lastIndex, blockMatch.index);
+      if (preceding.trim()) segments.push({ type: 'text', content: preceding });
+      if (isChartShaped) {
+        segments.push({ type: 'chart', data: parsed });
       }
+      lastIndex = blockMatch.index + blockMatch[0].length;
     }
   }
 
-  // Also clean up any lingering empty code fences like ```json \n ```
-  remainingText = remainingText.replace(/```(?:json:chart|json|chart)?\s*```/gi, '').trim();
+  const remainder = remainingText.slice(lastIndex);
+  if (remainder.trim()) segments.push({ type: 'text', content: remainder });
 
   const hasTodos = todos && todos.length > 0;
-  const hasRemainingText = remainingText.length > 0;
+  const hasContent = segments.length > 0;
+
+  const renderSegments = (topMargin: string) => segments.map((seg, i) => {
+    const marginTop = i === 0 ? topMargin : '0.75rem';
+    return seg.type === 'chart'
+      ? <div key={i} className="fade-in" style={{ marginTop }}><ChartRenderer data={seg.data} /></div>
+      : <div key={i} style={{ marginTop }}><TextBlock content={seg.content} /></div>;
+  });
 
   // Fast mode
   if (mode === 'fast') {
-    const showStatus = isStreaming && !hasRemainingText && !chartData;
+    const showStatus = isStreaming && !hasContent;
     return (
       <>
         {showStatus && <StatusDots toolCalls={toolCalls} />}
-        {hasRemainingText && <TextBlock content={remainingText} />}
-        {chartData && <div className="fade-in" style={{ marginTop: hasRemainingText ? '0.75rem' : '0' }}><ChartRenderer data={chartData} /></div>}
+        {renderSegments('0')}
       </>
     );
   }
 
-  // If there is no reasoning at all and no todos, just render the text (and chart if any)
+  // If there is no reasoning at all and no todos, just render the segments
   if (!combinedReasoning && !hasTodos) {
-    return (
-      <>
-        {hasRemainingText && <TextBlock content={remainingText} />}
-        {chartData && <div className="fade-in" style={{ marginTop: hasRemainingText ? '0.75rem' : '0' }}><ChartRenderer data={chartData} /></div>}
-      </>
-    );
+    return <>{renderSegments('0')}</>;
   }
 
   return (
     <>
       <ReasoningBlock content={combinedReasoning} isStreaming={isStreaming} todos={todos} toolCalls={toolCalls} />
-
-      {hasRemainingText && (
-        <div style={{ marginTop: '0.5rem' }}>
-          <TextBlock content={remainingText} />
-        </div>
-      )}
-
-      {chartData && (
-        <div className="fade-in" style={{ marginTop: hasRemainingText ? '0.75rem' : '0.25rem' }}>
-          <ChartRenderer data={chartData} />
-        </div>
-      )}
+      {renderSegments('0.5rem')}
     </>
   );
 };

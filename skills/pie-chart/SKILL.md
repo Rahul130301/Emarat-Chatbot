@@ -36,6 +36,7 @@ fenced code block. No other text inside the block — raw JSON only.
   "type": "pie",
   "title": "A clear descriptive title",
   "description": "One-line subtitle explaining what is being broken down",
+  "unit": "$",
   "data": [
     { "name": "Slice Label", "value": 46776.25, "percentage": 22.7 }
   ]
@@ -51,6 +52,10 @@ fenced code block. No other text inside the block — raw JSON only.
 - `"percentage"` → A SEPARATE field you compute yourself AFTER you have all
   the raw values. Formula: `round((this_item_value / sum_of_all_values) * 100, 1)`.
   This is NOT the same as `value`. Both fields must be present on every slice.
+- `"unit"` → the actual unit of the values, matching the domain you're in.
+  Use `"$"` for money, `"L"` for litres/fuel volume, `"%"` for a percentage
+  measure, `""` for a plain count. NEVER default to `"$"` for a non-money
+  metric — e.g. aviation fuel volume must use `"unit": "L"`, not `"$"`.
 
 ### Rules
 

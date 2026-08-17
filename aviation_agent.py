@@ -5,14 +5,6 @@ from agent_framework.openai import OpenAIChatClient
 from dotenv import load_dotenv
 from agent_framework import SkillsProvider
 
-# Ensure catalog database is initialized
-import db_catalog
-try:
-    import build_aviation_catalog
-    build_aviation_catalog.main()
-except Exception as e:
-    print(f"Warning: Auto-building aviation catalog encountered: {e}")
-
 from tools import (
     list_tables,
     get_table_schema,
@@ -74,9 +66,13 @@ Follow this exact text-to-SQL pipeline for all user inquiries:
    - Always call validate_sql on the generated SQL first.
    - Call run_sql only when validation passes.
 8. Result Synthesis & Charts:
-   - Synthesize the returned rows into clear, structured conversational insights.
-   - State fuel volume quantities clearly in Litres (L) with proper thousands separators (e.g. "10,080 L", "128,506 L").
-   - When the user asks for a chart, comparison, ranking, share, or distribution, output a json:chart block following the chart skill guidance.
+  - Synthesize the returned rows into clear, structured conversational insights.
+  - State fuel volume quantities clearly in Litres (L) with proper thousands separators (e.g. "10,080 L", "128,506 L").
+  - When the user asks for a chart, comparison, ranking, share, or distribution, output a json:chart block following the chart skill guidance. Fuel volume is measured in Litres, NEVER currency — always set "unit": "L" in the chart JSON (never "$") and phrase "y_label"/"description" in terms of Litres (L).
+
+RESPONSE DEPTH — match how much detail the user wants:
+- Default: keep the final answer clear and concise, with the key numbers and a short takeaway.
+- Elaborate mode: if the user asks for a report, deep dive, analysis, briefing, summary write-up, hidden insights, non-obvious patterns, anomalies, drivers, or anything that implies richer storytelling — answer elaborately. Cover the headline findings, supporting breakdowns, comparisons or trends where the data supports them, and any non-obvious insights or caveats. Structure the answer with short headings or bullets so it reads like a useful report, not a one-line reply. Still ground every claim in the query results; do not invent insights the data does not support.
 
 NEVER give a bare refusal. Always explain the data context and offer concrete alternatives if a term or date is not found."""
 
@@ -90,15 +86,21 @@ MANDATORY REASONING RULE: Before calling ANY tool, and after receiving any tool 
 2. The specific rationale for calling this tool and what schema attributes or metrics you expect to find.
 3. How this step connects to the overall text-to-SQL pipeline and guarantees analytical accuracy.
 NEVER call tools silently or batch tools without writing a thorough 50+ word reasoning paragraph before each one.
-ONLY your final conversational answer to the user should be output outside of these tags."""
+ONLY your final conversational answer to the user should be output outside of these tags.
+
+QUERY BUDGET — keep latency in check:
+- Prefer 3 well-designed run_sql calls that return the rankings/breakdowns you need; hard cap is 5 run_sql calls per user question (validate_sql retries after a failed validation do not count toward this cap).
+- For reports or hidden-insight requests, plan the analysis first, then fetch with fewer richer queries (e.g. GROUP BY with multiple dimensions) instead of many narrow exploratory queries.
+- Once you have enough rows to answer, stop querying and synthesize. Do not keep probing for "one more" cut of the data."""
 
 AVIATION_FAST_DIRECTIVE = """
 
 RESPONSE STYLE — this is the fast, low-latency mode: work through the
 pipeline above silently. Do NOT output any planning text, step-by-step
 narration, or internal reasoning, and do NOT use <reasoning> tags at all —
-just call the tools you need and then reply with only the final, concise,
-conversational answer with numbers formatted in Litres (L)."""
+just call the tools you need and then reply with only the final conversational
+answer (concise by default; elaborate when RESPONSE DEPTH above applies),
+with numbers formatted in Litres (L)."""
 
 AVIATION_REASONING_INSTRUCTIONS = AVIATION_DOMAIN_INTRO + AVIATION_REASONING_DIRECTIVE
 AVIATION_FAST_INSTRUCTIONS = AVIATION_DOMAIN_INTRO + AVIATION_FAST_DIRECTIVE
@@ -133,7 +135,7 @@ def build_aviation_reasoning_agent():
         disable_web_search=True,
         disable_mode=True,
         disable_todo=False,
-        loop_max_iterations=12,
+        loop_max_iterations=10,
     )
 
 
