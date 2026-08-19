@@ -3,7 +3,7 @@ import re
 from typing import Annotated
 from pydantic import Field
 from agent_framework import tool
-from db import get_connection
+from db import run_with_connection
 
 FORBIDDEN_PATTERN = re.compile(
     r"\b(insert|update|delete|drop|alter|truncate|grant|revoke|create)\b", re.IGNORECASE
@@ -47,14 +47,14 @@ def validate_sql(
     if _order_by_needs_offset(stripped):
         to_wrap = f"{stripped} OFFSET 0 ROWS"
 
-    conn = get_connection()
-    try:
+    def _run(conn):
         with conn.cursor() as cur:
             # TOP 0 forces SQL Server/Fabric to plan and validate the query
             # (catches nonexistent tables/columns) without fetching real rows.
             cur.execute(f"SELECT TOP 0 * FROM ({to_wrap}) AS validation_check")
+
+    try:
+        run_with_connection(_run)
         return "VALID: query is well-formed and all referenced tables/columns exist."
     except Exception as e:
         return f"INVALID: {e}"
-    finally:
-        conn.close()

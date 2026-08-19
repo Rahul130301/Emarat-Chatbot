@@ -22,13 +22,14 @@ TOOLS = [
 
 # Fast-mode tool set: drops list_tables (dead weight — never referenced in
 # the pipeline below; search_schema + get_table_schema fully replace it) and
-# search_example_sql (aids SQL *style* consistency, not correctness —
-# validate_sql + exact schema lookup already prevent broken/hallucinated
-# SQL, so dropping it trades a little stylistic consistency for one fewer
+# search_example_sql (aids SQL *style* consistency, not correctness — exact
+# schema lookup already prevents broken/hallucinated SQL, so dropping it
+# trades a little stylistic consistency for one fewer
 # round trip). lookup_metric is deliberately KEPT — it's what prevents the
 # same named metric (e.g. "total contract value") being computed
 # differently across questions, which is a real accuracy/consistency risk,
-# not just style.
+# not just style. validate_sql is kept so Fast mode still compiles the query
+# against Fabric before run_sql (accuracy over latency).
 FAST_TOOLS = [
     get_table_schema, run_sql,
     resolve_entity, lookup_glossary_term, lookup_metric,
@@ -137,6 +138,20 @@ include its real output in your answer, in the same turn. If a result is too
 large to show in full, say so explicitly and show a representative sample or
 summary right then — never claim completion without visible proof.
 
+ROW COUNTS MUST MATCH WHAT YOU ACTUALLY DISPLAY — this is a correctness rule,
+not a style preference. run_sql prefixes every result with "ROWS RETURNED: N".
+- Never describe your table with a number that differs from the number of rows
+  you actually printed in it. If run_sql returned 50 rows and you display 20,
+  do NOT write "below are the 50 most recent records" — write "showing the 20
+  most recent (of 50 returned)". Count the rows in your own table before you
+  describe it.
+- A total from a separate COUNT(*) query is a different number from the rows
+  you are showing. Label it as the total explicitly (e.g. "412 contracts in
+  total") and never let it imply that many rows are listed below.
+- When the user asks to "list" records, display every row run_sql returned.
+  Do not silently trim the list for brevity — if it's too long to show in
+  full, say exactly how many you are showing and why.
+
 RESPONSE DEPTH — match how much detail the user wants:
 - Default: keep the final answer clear and concise, with the key numbers and a
   short takeaway.
@@ -191,6 +206,13 @@ skip step 7 (example retrieval) entirely and go straight from step 6
 (metric resolution) to step 8 (SQL generation) using only what steps 3-6
 returned. list_tables is also not available — you were never meant to need
 it; search_schema and get_table_schema fully cover table/column discovery.
+Everything else about steps 8-10 is unchanged: every table and column must
+still have come from get_table_schema, and you must still call validate_sql
+(step 9) and only call run_sql after it returns VALID — including DOCUMENT
+mode step 4d. If run_sql returns a message starting with "SQL error:", read
+the error, fix the query, re-validate, and call run_sql once more. If that
+second attempt also fails, tell the user what the error actually was instead
+of retrying further.
 
 SPEED — several of the pipeline's tool calls do not depend on each other's
 output, so issue them together in the SAME turn instead of one at a time:
@@ -264,7 +286,14 @@ def build_fast_agent():
         # unchanged and still runs, so accuracy is unaffected.
         default_options={
             "allow_multiple_tool_calls": True,
-            "reasoning": {"effort": "low"}
+            # No reasoning tokens and terse output: the pipeline above already
+            # constrains what to do, so per-turn thinking buys little here.
+            "reasoning": {"effort": "none"},
+            #"verbosity": "low",
+            # DOMAIN_INTRO plus the tool schemas are resent on every turn of
+            # every request, so a stable cache key keeps that prefix cached.
+            "prompt_cache_key": "emarat-contracts-fast-v3",
+            "prompt_cache_retention": "24h",
         },
     )
 

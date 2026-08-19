@@ -3,6 +3,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import json
+import threading
 import time
 import uuid
 import sys
@@ -10,13 +11,20 @@ import os
 
 # Ensure the current directory is in sys.path so we can import from agent
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from db import set_current_database
+from db import set_current_database, warmup_connections
 from db_catalog import set_current_catalog_path
 from agent import build_reasoning_agent as build_contracts_reasoning_agent, build_fast_agent as build_contracts_fast_agent
 from aviation_agent import build_aviation_reasoning_agent, build_aviation_fast_agent
 from agent_framework._harness._todo import TodoSessionStore
 
 app = FastAPI()
+
+# Kick off the Fabric AAD handshake (~2.5-3s per connection) for both
+# warehouses the moment the process starts, in the background, so the pool
+# already has live connections ready before the first user query ever hits
+# run_sql/get_table_schema/etc. This never blocks server startup — requests
+# that arrive before it finishes just connect on-demand as before.
+threading.Thread(target=warmup_connections, name="db-warmup", daemon=True).start()
 
 # Allow CORS for frontend
 app.add_middleware(

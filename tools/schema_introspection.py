@@ -2,13 +2,12 @@
 from typing import Annotated
 from pydantic import Field
 from agent_framework import tool
-from db import get_connection
+from db import run_with_connection
 
 @tool(approval_mode="never_require")
 def list_tables() -> str:
     """List all table names available in the database."""
-    conn = get_connection()
-    try:
+    def _run(conn):
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -18,10 +17,10 @@ def list_tables() -> str:
                 ORDER BY s.name, t.name
                 """
             )
-            rows = cur.fetchall()
-        return "\n".join(f"{schema}.{table}" for schema, table in rows)
-    finally:
-        conn.close()
+            return cur.fetchall()
+
+    rows = run_with_connection(_run)
+    return "\n".join(f"{schema}.{table}" for schema, table in rows)
 
 @tool(approval_mode="never_require")
 def get_table_schema(
@@ -30,8 +29,7 @@ def get_table_schema(
     """Return the exact column names and data types for a given table. Call this
     after search_schema has narrowed down which table(s) are relevant — never
     guess a column name."""
-    conn = get_connection()
-    try:
+    def _run(conn):
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -44,9 +42,9 @@ def get_table_schema(
                 """,
                 (table_name,),
             )
-            rows = cur.fetchall()
-        if not rows:
-            return f"No table named '{table_name}' found."
-        return "\n".join(f"{col} ({dtype})" for col, dtype in rows)
-    finally:
-        conn.close()
+            return cur.fetchall()
+
+    rows = run_with_connection(_run)
+    if not rows:
+        return f"No table named '{table_name}' found."
+    return "\n".join(f"{col} ({dtype})" for col, dtype in rows)

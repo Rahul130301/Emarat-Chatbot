@@ -31,6 +31,8 @@ AVIATION_TOOLS = [
     validate_sql,
 ]
 
+# validate_sql is kept so Fast mode still compiles the query against Fabric
+# before run_sql (accuracy over latency). search_example_sql stays excluded.
 FAST_AVIATION_TOOLS = [
     list_tables,
     get_table_schema,
@@ -70,6 +72,21 @@ Follow this exact text-to-SQL pipeline for all user inquiries:
   - State fuel volume quantities clearly in Litres (L) with proper thousands separators (e.g. "10,080 L", "128,506 L").
   - When the user asks for a chart, comparison, ranking, share, or distribution, output a json:chart block following the chart skill guidance. Fuel volume is measured in Litres, NEVER currency — always set "unit": "L" in the chart JSON (never "$") and phrase "y_label"/"description" in terms of Litres (L).
 
+ROW COUNTS MUST MATCH WHAT YOU ACTUALLY DISPLAY — this is a correctness rule,
+not a style preference. run_sql prefixes every result with "ROWS RETURNED: N".
+- Never describe your table with a number that differs from the number of rows
+  you actually printed in it. If run_sql returned 50 rows and you display 20,
+  do NOT write "below are the 50 most recent records" — write "showing the 20
+  most recent (of 50 returned)". Count the rows in your own table before you
+  describe it.
+- A total from a separate COUNT(*) query is a different number from the rows
+  you are showing. Label it as the total explicitly (e.g. "5,043 total
+  refueling movements on record") and never let it imply that many rows are
+  listed below.
+- When the user asks to "list" records, display every row run_sql returned.
+  Do not silently trim the list for brevity — if it's too long to show in
+  full, say exactly how many you are showing and why.
+
 RESPONSE DEPTH — match how much detail the user wants:
 - Default: keep the final answer clear and concise, with the key numbers and a short takeaway.
 - Elaborate mode: if the user asks for a report, deep dive, analysis, briefing, summary write-up, hidden insights, non-obvious patterns, anomalies, drivers, or anything that implies richer storytelling — answer elaborately. Cover the headline findings, supporting breakdowns, comparisons or trends where the data supports them, and any non-obvious insights or caveats. Structure the answer with short headings or bullets so it reads like a useful report, not a one-line reply. Still ground every claim in the query results; do not invent insights the data does not support.
@@ -100,7 +117,15 @@ pipeline above silently. Do NOT output any planning text, step-by-step
 narration, or internal reasoning, and do NOT use <reasoning> tags at all —
 just call the tools you need and then reply with only the final conversational
 answer (concise by default; elaborate when RESPONSE DEPTH above applies),
-with numbers formatted in Litres (L)."""
+with numbers formatted in Litres (L).
+
+TOOL AVAILABILITY IN THIS MODE: search_example_sql is not available here, so
+skip step 5 (example SQL search) entirely. validate_sql is still available —
+in step 7 always call validate_sql first and only call run_sql when it
+returns VALID. If run_sql returns a message starting with "SQL error:", read
+the error, fix the query, re-validate, and call run_sql once more. If that
+second attempt also fails, tell the user what the error actually was instead
+of retrying further."""
 
 AVIATION_REASONING_INSTRUCTIONS = AVIATION_DOMAIN_INTRO + AVIATION_REASONING_DIRECTIVE
 AVIATION_FAST_INSTRUCTIONS = AVIATION_DOMAIN_INTRO + AVIATION_FAST_DIRECTIVE
@@ -149,7 +174,10 @@ def build_aviation_fast_agent():
         context_providers=[_build_skills_provider()],
         default_options={
             "allow_multiple_tool_calls": True,
-            "reasoning": {"effort": "low"}
+            "reasoning": {"effort": "none"},
+            #"verbosity": "low",
+            "prompt_cache_key": "emarat-aviation-fast-v3",
+            "prompt_cache_retention": "24h",
         },
     )
 
