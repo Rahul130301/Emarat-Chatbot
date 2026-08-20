@@ -6,3 +6,4 @@ from .schema_search import search_schema
 from .example_search import search_example_sql
 from .validation import validate_sql
 from .document_lookup import get_contract_document
+from .graph_schema_search import search_schema_graph

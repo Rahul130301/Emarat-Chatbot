@@ -24,10 +24,10 @@ def list_tables() -> str:
 
 @tool(approval_mode="never_require")
 def get_table_schema(
-    table_name: Annotated[str, Field(description="Exact table name to inspect, as returned by list_tables or search_schema.")],
+    table_name: Annotated[str, Field(description="Exact table name to inspect, as returned by list_tables or search_schema_graph.")],
 ) -> str:
     """Return the exact column names and data types for a given table. Call this
-    after search_schema has narrowed down which table(s) are relevant — never
+    after search_schema_graph has narrowed down which table(s) are relevant — never
     guess a column name."""
     def _run(conn):
         with conn.cursor() as cur:

@@ -7,8 +7,8 @@ from agent_framework import SkillsProvider
 from tools import (
     list_tables, get_table_schema, run_sql,
     resolve_entity, lookup_glossary_term, lookup_metric,
-    search_schema, search_example_sql, validate_sql,
-    get_contract_document,
+    search_example_sql, validate_sql,
+    get_contract_document, search_schema_graph
 )
 
 load_dotenv(override=True)
@@ -16,7 +16,7 @@ load_dotenv(override=True)
 TOOLS = [
     list_tables, get_table_schema, run_sql,
     resolve_entity, lookup_glossary_term, lookup_metric,
-    search_schema, search_example_sql, validate_sql,
+    search_schema_graph, search_example_sql, validate_sql,
     get_contract_document,
 ]
 
@@ -33,7 +33,7 @@ TOOLS = [
 FAST_TOOLS = [
     get_table_schema, run_sql,
     resolve_entity, lookup_glossary_term, lookup_metric,
-    search_schema, validate_sql,
+    search_schema_graph, validate_sql,
     get_contract_document,
 ]
 
@@ -70,9 +70,12 @@ STRUCTURED MODE:
    assume the user's spelling/phrasing matches what's stored.
 4. Business glossary — call lookup_glossary_term for any business language in
    the question (revenue, client, deal size, etc) to find the real table/column.
-5. Schema retrieval — call search_schema with the question to find relevant
-   tables/columns, then call get_table_schema on the specific table(s) it
-   points to for the exact, full column list. Never guess a column name.
+5. Schema retrieval — call search_schema_graph with the question to find
+   relevant tables/columns AND which other tables they can be joined to (and
+   via which column). Then call get_table_schema on the specific table(s) it
+   points to for the exact, full column list. Never guess a column name. If
+   a joinable table is marked "shared_key" rather than "foreign_key", don't
+   assume clean 1-to-1 cardinality on that join.
 6. Metric resolution — call lookup_metric for any named metric (total contract
    value, average deal size, renewal rate, top clients, etc) to get the
    pre-approved SQL pattern. Use it, don't invent your own aggregate logic for
@@ -205,7 +208,8 @@ TOOL AVAILABILITY IN THIS MODE: search_example_sql is not available here —
 skip step 7 (example retrieval) entirely and go straight from step 6
 (metric resolution) to step 8 (SQL generation) using only what steps 3-6
 returned. list_tables is also not available — you were never meant to need
-it; search_schema and get_table_schema fully cover table/column discovery.
+it; search_schema_graph and get_table_schema fully cover table/column
+discovery.
 Everything else about steps 8-10 is unchanged: every table and column must
 still have come from get_table_schema, and you must still call validate_sql
 (step 9) and only call run_sql after it returns VALID — including DOCUMENT
