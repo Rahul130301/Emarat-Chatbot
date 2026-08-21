@@ -21,7 +21,6 @@ from tools import (
     resolve_entity,
     lookup_glossary_term,
     lookup_metric,
-    search_schema,
     get_table_schema,
     search_example_sql,
     validate_sql,

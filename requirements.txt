@@ -27,3 +27,4 @@ uvicorn
 pydantic
 typing_extensions
 neo4j
+sqlglot

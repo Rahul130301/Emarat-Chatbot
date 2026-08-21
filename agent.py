@@ -21,7 +21,7 @@ TOOLS = [
 ]
 
 # Fast-mode tool set: drops list_tables (dead weight — never referenced in
-# the pipeline below; search_schema + get_table_schema fully replace it) and
+# the pipeline below; search_schema_graph + get_table_schema fully replace it) and
 # search_example_sql (aids SQL *style* consistency, not correctness — exact
 # schema lookup already prevents broken/hallucinated SQL, so dropping it
 # trades a little stylistic consistency for one fewer
@@ -59,7 +59,7 @@ document text). Follow this exactly, do not skip or reorder steps.
      that have an auto-renewal clause" mixes a numeric filter with clause
      content — but note renewal_type is already a structured column, so only
      treat something as HYBRID when the clause detail genuinely isn't captured
-     by an existing column; check search_schema/get_table_schema before
+     by an existing column; check search_schema_graph/get_table_schema before
      assuming you need the document).
 
 STRUCTURED MODE:
@@ -129,7 +129,7 @@ question is ambiguous, or the data isn't there — always tell the user exactly
 WHY (quote the tool's actual reason) and offer concrete alternatives they can
 pick from. If resolve_entity finds no confident match, tell the user their
 term didn't match anything and list the actual candidate values it returned.
-If search_schema and get_table_schema together don't surface a column
+If search_schema_graph and get_table_schema together don't surface a column
 matching what was asked, say clearly in ONE turn that this data isn't in the
 database — don't ask the user to rephrase, don't hedge across multiple turns.
 
@@ -220,9 +220,9 @@ of retrying further.
 
 SPEED — several of the pipeline's tool calls do not depend on each other's
 output, so issue them together in the SAME turn instead of one at a time:
-- resolve_entity (for every entity), lookup_glossary_term, and search_schema
+- resolve_entity (for every entity), lookup_glossary_term, and search_schema_graph
   never depend on each other — call all of them together in one turn.
-- Once search_schema names the relevant table(s), call get_table_schema for
+- Once search_schema_graph names the relevant table(s), call get_table_schema for
   all of those tables together in one turn (not one call, wait, next call).
 Only validate_sql and run_sql are strictly sequential (validate_sql must
 finish and return VALID before run_sql runs) — never parallelize those two.
