@@ -6,15 +6,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from graph_db import get_driver, close_driver
 from embedding_utils import embed
 
-# ---------------------------------------------------------------------------
-# Same content as build_schema_catalog.py / build_aviation_schema_catalog.py
-# / build_glossary_catalog.py / build_aviation_glossary_catalog.py.
-# Copy-pasted here rather than imported so this script has one flat source
-# of truth and doesn't depend on those modules' side effects (they write to
-# SQLite on import-time execution of main()).
-# ---------------------------------------------------------------------------
-
-# --- add near the top of build/build_knowledge_graph.py ---
 import re
 
 def normalize(text: str) -> str:
@@ -96,8 +87,8 @@ CONTRACT_SCHEMA = {
     ("contract_documents", "full_markdown"): "Full contract text in markdown. Large field — only fetch when a question needs actual clause content, never for structured/aggregate questions.",
 }
 CONTRACT_RELATIONSHIPS = [
-    ("contract_documents", "contracts", "contract_id", "foreign_key"),
-    ("sales", "contracts", "company_name", "shared_key"),
+    ("contract_documents", "contracts", "contract_id", "many_to_one"),
+    ("sales", "contracts", "contract_id", "many_to_one"),  
 ]
 
 AVIATION_SCHEMA = {
@@ -213,14 +204,14 @@ def build_domain(session, db_name, schema, relationships):
                 table=table, db=db_name, col=column, desc=description,
             )
 
-    for from_table, to_table, via_column, join_type in relationships:
+    for many_table, one_table, via_column, cardinality in relationships:
         session.run(
             """
-            MATCH (a:Table {name:$from_t, database:$db}), (b:Table {name:$to_t, database:$db})
+            MATCH (a:Table {name:$many_t, database:$db}), (b:Table {name:$one_t, database:$db})
             MERGE (a)-[r:REFERENCES {via_column:$via}]->(b)
-            SET r.join_type = $jt
+            SET r.cardinality = $card
             """,
-            from_t=from_table, to_t=to_table, via=via_column, db=db_name, jt=join_type,
+            many_t=many_table, one_t=one_table, via=via_column, db=db_name, card=cardinality,
         )
 
     print(f"[{db_name}] indexed {len(schema)} schema entries, {len(relationships)} relationships.")

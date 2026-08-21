@@ -4,6 +4,7 @@ from typing import Annotated
 from pydantic import Field
 from agent_framework import tool
 from db import run_with_connection
+from .check_ontology import check_ontology
 
 FORBIDDEN_PATTERN = re.compile(
     r"\b(insert|update|delete|drop|alter|truncate|grant|revoke|create)\b", re.IGNORECASE
@@ -55,6 +56,15 @@ def validate_sql(
 
     try:
         run_with_connection(_run)
-        return "VALID: query is well-formed and all referenced tables/columns exist."
     except Exception as e:
         return f"INVALID: {e}"
+
+    ontology_issues = check_ontology(stripped)
+    blocking = [i.removeprefix("BLOCK: ") for i in ontology_issues if i.startswith("BLOCK:")]
+    warnings = [i for i in ontology_issues if i.startswith("WARNING:")]
+
+    if blocking:
+        return "INVALID: " + " ".join(blocking)
+    if warnings:
+        return "VALID (with warnings): query is well-formed and all referenced tables/columns exist.\n" + "\n".join(warnings)
+    return "VALID: query is well-formed and all referenced tables/columns exist."

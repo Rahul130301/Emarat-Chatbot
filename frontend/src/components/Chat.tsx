@@ -435,10 +435,10 @@ const TOOL_LABELS: Record<string, { title: string, desc: string, defaultReasonin
     desc: 'Retrieve pre-approved SQL aggregate pattern',
     defaultReasoning: 'Resolving metric definition from the centralized metric store to retrieve pre-approved SQL aggregation formulas and filtering logic. This guarantees analytical consistency and prevents divergent metric definitions across queries.'
   },
-  search_schema: {
-    title: 'Database Schema Retrieval',
-    desc: 'Identify relevant tables and column definitions',
-    defaultReasoning: 'Searching database catalog and schema metadata to identify the exact target tables, foreign key relationships, and data types required to formulate the aggregate SQL query accurately and safely.'
+  search_schema_graph: {
+    title: 'Knowledge Graph Schema Search',
+    desc: 'Find relevant tables and join paths',
+    defaultReasoning: 'Querying the knowledge graph to identify relevant tables, columns, and join relationships needed for the query. This provides join-aware schema discovery with relationship context.'
   },
   get_table_schema: {
     title: 'Table Schema Retrieval',
@@ -657,7 +657,7 @@ const FAST_STATUS_VERBS: Record<string, string> = {
   resolve_entity: 'Resolving entities',
   lookup_glossary_term: 'Mapping business terms',
   lookup_metric: 'Retrieving metric definitions',
-  search_schema: 'Retrieving schema',
+  search_schema_graph: 'Searching schema graph',
   get_table_schema: 'Reading table structure',
   list_tables: 'Discovering tables',
   search_example_sql: 'Checking similar queries',

@@ -66,7 +66,7 @@ User question
 4. lookup_glossary_term  →  glossary_catalog (business → table/column)
     │                                                           │
     ▼                                                           │
-5. search_schema  →  schema_catalog (semantic top-k tables/columns)
+5. search_schema_graph  →  knowledge_graph (semantic join-aware schema)
     │                                                           │
     ▼                                                           │
 6. get_table_schema  →  Fabric sys.columns (exact column names/types)
@@ -103,7 +103,7 @@ Same pattern, scoped to `[dbo].[aviation-uplifts]`: resolve airline/aircraft/sta
 
 Independent discovery tools are issued in the same turn:
 
-1. Parallel: `resolve_entity` (all entities) + `lookup_glossary_term` + `search_schema`
+1. Parallel: `resolve_entity` (all entities) + `lookup_glossary_term` + `search_schema_graph`
 2. Parallel: `get_table_schema` for every relevant table
 3. Sequential only: `validate_sql` → (must be VALID) → `run_sql`
 
@@ -118,7 +118,7 @@ Optional: set `AZURE_OPENAI_FAST_DEPLOYMENT_NAME` to a smaller/faster deployment
 | `resolve_entity` | `value_catalog` + `tools/aliases.json` | Map user phrases → canonical DB values (exact → alias → fuzzy ≥0.6 → embedding ≥0.90 → LLM) |
 | `lookup_glossary_term` | `glossary_catalog` (`entry_type=term`) | Business language → table/column |
 | `lookup_metric` | `glossary_catalog` (`entry_type=metric`) | Named metric → approved SQL pattern |
-| `search_schema` | `schema_catalog` | Embedding similarity over table/column descriptions (top 10) |
+| `search_schema_graph` | `knowledge_graph` | Join-aware schema search with relationship context |
 | `search_example_sql` | `example_sql_catalog` | Similar Q→SQL patterns (top 3); Reasoning only |
 | `list_tables` | Fabric `sys.tables` | Enumerate tables (aviation Fast keeps it; contracts Fast drops it) |
 | `get_table_schema` | Fabric `sys.columns` | Exact column names and types |
