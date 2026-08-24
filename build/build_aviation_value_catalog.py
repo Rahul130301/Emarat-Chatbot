@@ -16,7 +16,7 @@ from embedding_utils import embed, embedding_to_json
 CATALOG_COLUMNS = [
     ("aviation-uplifts", "Airline"),
     ("aviation-uplifts", "AircraftType"),
-    ("aviation-uplifts", "Stand"),
+    #("aviation-uplifts", "Stand"),
     ("aviation-uplifts", "Location"),
     #("aviation-uplifts", "Registration"),
     #("aviation-uplifts", "FlightNo"),

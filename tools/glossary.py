@@ -6,9 +6,10 @@ from typing import Annotated
 from pydantic import Field
 from agent_framework import tool
 from openai import OpenAI
-from db_catalog import get_catalog_connection
-from embedding_utils import embed, embedding_from_json
-from similarity_utils import cosine_similarity
+from embedding_utils import embed
+from cosmos_catalog_db import get_container
+from db import get_current_database
+from azure.cosmos import exceptions as cosmos_exceptions
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -52,51 +53,45 @@ def llm_pick(entry_type: str, phrase: str, candidates: list[tuple[str, str]]) ->
 
 def _lookup(entry_type: str, phrase: str) -> str:
     normalized = normalize(phrase)
-    conn = get_catalog_connection()
-    cur = conn.cursor()
+    database = get_current_database()
+    container = get_container("glossary_catalog")
 
-    # 1. Exact
-    cur.execute(
-        "SELECT definition FROM glossary_catalog WHERE entry_type = ? AND normalized_term = ?",
-        (entry_type, normalized),
-    )
-    row = cur.fetchone()
-    if row:
-        conn.close()
-        return row[0]
-
-    # 2. Embedding — top-k candidates
-    cur.execute(
-        "SELECT term, definition, embedding FROM glossary_catalog WHERE entry_type = ?",
-        (entry_type,),
-    )
-    all_rows = cur.fetchall()
-    conn.close()
-
-    t0 = time.time()
+    # 1. Exact — a direct point-read, not a query, since the migration keyed
+    # every document's id as f"{entry_type}:{normalized_term}"
     try:
-        query_vec = embed(phrase)
-    except Exception as e:
-        raise
+        item = container.read_item(item=f"{entry_type}:{normalized}", partition_key=database)
+        return item["definition"]
+    except cosmos_exceptions.CosmosResourceNotFoundError:
+        pass
 
-    scored = []
-    for term, definition, emb_json in all_rows:
-        if emb_json:
-            sim = cosine_similarity(query_vec, embedding_from_json(emb_json))
-            scored.append((term, definition, sim))
-    scored.sort(key=lambda r: r[2], reverse=True)
-    candidates = scored[:TOP_K]
+    # 2. Embedding — top-k via Cosmos vector search, scoped to this domain and entry_type
+    query_vec = embed(phrase)
+    results = list(container.query_items(
+        query="""
+            SELECT TOP @k c.term, c.definition, VectorDistance(c.embedding, @qv) AS score
+            FROM c
+            WHERE c.database = @db AND c.entry_type = @et
+            ORDER BY VectorDistance(c.embedding, @qv)
+        """,
+        parameters=[
+            {"name": "@k", "value": TOP_K},
+            {"name": "@qv", "value": query_vec},
+            {"name": "@db", "value": database},
+            {"name": "@et", "value": entry_type},
+        ],
+        partition_key=database,
+    ))
 
-    if candidates and candidates[0][2] >= SEMANTIC_ACCEPT:
-        return candidates[0][1]
+    if results and results[0]["score"] >= SEMANTIC_ACCEPT:  # verify direction — see note above
+        return results[0]["definition"]
 
-    # 3. LLM tiebreak
-    pool = [(t, d) for t, d, _ in candidates]
+    # 3. LLM tiebreak — unchanged
+    pool = [(r["term"], r["definition"]) for r in results]
     picked = llm_pick(entry_type, phrase, pool)
     if picked:
         return picked
 
-    # 4. Genuinely undefined
+    # 4. Genuinely undefined — unchanged
     return (
         f"No defined {entry_type} matches '{phrase}'. Don't invent an interpretation — "
         f"use the raw schema/column info instead, or ask the user to clarify."

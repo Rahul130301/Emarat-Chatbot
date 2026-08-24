@@ -101,3 +101,4 @@ __pycache__/
 agent-file-memory/
 catalog.db
 .deepeval 
+test.py
