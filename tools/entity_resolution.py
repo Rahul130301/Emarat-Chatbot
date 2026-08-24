@@ -7,9 +7,10 @@ from typing import Annotated
 from pydantic import Field
 from agent_framework import tool
 from openai import OpenAI
-from db_catalog import get_catalog_connection
 from embedding_utils import embed, embedding_from_json
 from similarity_utils import fuzzy_ratio, cosine_similarity
+from cosmos_catalog_db import get_container
+from db import get_current_database
 from dotenv import load_dotenv
 load_dotenv(override=True)
 
@@ -73,24 +74,27 @@ def llm_resolve(column_name: str, value: str, candidates: list[str]) -> str | No
 
 
 def _fetch_candidates(column_name: str, table_name: str | None) -> list[tuple]:
-    """Returns (table_name, canonical_value, normalized_value, embedding_json) rows."""
-    conn = get_catalog_connection()
-    cur = conn.cursor()
+    """Returns (table_name, canonical_value, normalized_value, embedding_json) rows,
+    scoped to the current domain's Cosmos partition — same shape as before,
+    just sourced from Cosmos instead of SQLite."""
+    container = get_container("value_catalog")
+    database = get_current_database()
+
     if table_name:
-        cur.execute(
-            "SELECT table_name, canonical_value, normalized_value, embedding "
-            "FROM value_catalog WHERE column_name = ? AND table_name = ?",
-            (column_name, table_name),
-        )
+        query = ("SELECT c.table_name, c.canonical_value, c.normalized_value, c.embedding "
+                  "FROM c WHERE c.database = @db AND c.column_name = @col AND c.table_name = @table")
+        params = [{"name": "@db", "value": database}, {"name": "@col", "value": column_name},
+                  {"name": "@table", "value": table_name}]
     else:
-        cur.execute(
-            "SELECT table_name, canonical_value, normalized_value, embedding "
-            "FROM value_catalog WHERE column_name = ?",
-            (column_name,),
-        )
-    rows = cur.fetchall()
-    conn.close()
-    return rows
+        query = ("SELECT c.table_name, c.canonical_value, c.normalized_value, c.embedding "
+                  "FROM c WHERE c.database = @db AND c.column_name = @col")
+        params = [{"name": "@db", "value": database}, {"name": "@col", "value": column_name}]
+
+    items = container.query_items(query=query, parameters=params, partition_key=database)
+    return [
+        (item["table_name"], item["canonical_value"], item["normalized_value"], json.dumps(item["embedding"]))
+        for item in items
+    ]
 
 
 @tool(approval_mode="never_require")
