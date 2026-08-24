@@ -470,6 +470,16 @@ const TOOL_LABELS: Record<string, { title: string, desc: string, defaultReasonin
     desc: 'Fetch full document text for clause check',
     defaultReasoning: 'Retrieving full contract legal document text to perform clause extraction, verify specific terms, and validate contractual obligations directly against primary contract sources.'
   },
+  find_query_function: {
+    title: 'Pre-Built Function Matching',
+    desc: 'Check for a pre-approved query function',
+    defaultReasoning: 'Searching the pre-built function catalog to check whether this question is already covered by a pre-approved, reviewed query function before falling back to schema search and manual SQL generation. This can skip the schema/SQL pipeline entirely when a confident match exists.'
+  },
+  run_query_function: {
+    title: 'Query Function Execution',
+    desc: 'Run the matched pre-approved function',
+    defaultReasoning: 'Executing the matched pre-built query function with the resolved parameter values. Since the underlying SQL is fixed and already reviewed, this guarantees a correct join/aggregation without any risk of a hallucinated query.'
+  },
 };
 
 interface ExecutionStepItem {
@@ -664,6 +674,8 @@ const FAST_STATUS_VERBS: Record<string, string> = {
   validate_sql: 'Validating query',
   run_sql: 'Running query',
   get_contract_document: 'Reading document',
+  find_query_function: 'Searching for a matching function',
+  run_query_function: 'Running matched function',
 };
 
 const StatusDots = ({ toolCalls }: { toolCalls?: string[] }) => {

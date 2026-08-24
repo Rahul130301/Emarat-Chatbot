@@ -8,7 +8,8 @@ from tools import (
     list_tables, get_table_schema, run_sql,
     resolve_entity, lookup_glossary_term, lookup_metric,
     search_example_sql, validate_sql,
-    get_contract_document, search_schema_graph
+    get_contract_document, search_schema_graph,
+    find_query_function, run_query_function
 )
 
 load_dotenv(override=True)
@@ -17,7 +18,7 @@ TOOLS = [
     list_tables, get_table_schema, run_sql,
     resolve_entity, lookup_glossary_term, lookup_metric,
     search_schema_graph, search_example_sql, validate_sql,
-    get_contract_document,
+    get_contract_document, find_query_function, run_query_function
 ]
 
 # Fast-mode tool set: drops list_tables (dead weight — never referenced in
@@ -34,7 +35,7 @@ FAST_TOOLS = [
     get_table_schema, run_sql,
     resolve_entity, lookup_glossary_term, lookup_metric,
     search_schema_graph, validate_sql,
-    get_contract_document,
+    get_contract_document, find_query_function, run_query_function
 ]
 
 # ---------------------------------------------------------------------------
@@ -68,30 +69,37 @@ STRUCTURED MODE:
    implied in the question.
 3. Entity resolution — call resolve_entity on EVERY entity from step 2. Never
    assume the user's spelling/phrasing matches what's stored.
-4. Business glossary — call lookup_glossary_term for any business language in
+4. Function check — ALWAYS call find_query_function first, before any other
+   tool, with the user's question. If it matches a function, resolve any
+   named entities with resolve_entity, then call run_query_function with the
+   returned function_name and parameters, and go straight to result
+   interpretation. Do NOT call search_schema_graph, write SQL, or call
+   validate_sql/run_sql for that question. If it says no function matches,
+   continue to the normal pipeline below.
+5. Business glossary — call lookup_glossary_term for any business language in
    the question (revenue, client, deal size, etc) to find the real table/column.
-5. Schema retrieval — call search_schema_graph with the question to find
+6. Schema retrieval — call search_schema_graph with the question to find
    relevant tables/columns AND which other tables they can be joined to (and
    via which column). Then call get_table_schema on the specific table(s) it
    points to for the exact, full column list. Never guess a column name. If
    a joinable table is marked "shared_key" rather than "foreign_key", don't
    assume clean 1-to-1 cardinality on that join.
-6. Metric resolution — call lookup_metric for any named metric (total contract
+7. Metric resolution — call lookup_metric for any named metric (total contract
    value, average deal size, renewal rate, top clients, etc) to get the
    pre-approved SQL pattern. Use it, don't invent your own aggregate logic for
    a metric that already has a defined pattern.
-7. Example retrieval — call search_example_sql with the question to see how
+8. Example retrieval — call search_example_sql with the question to see how
    similar past questions were solved. Use these as structural patterns, not
    verbatim answers.
-8. SQL generation — write the query using everything steps 3-7 returned. Every
+9. SQL generation — write the query using everything steps 3-7 returned. Every
    table and column must have come from get_table_schema — never fabricate one.
-9. Validation — call validate_sql on the query. If INVALID, fix and
-   re-validate before proceeding. Do not call run_sql on an unvalidated query.
-10. Execution — call run_sql only after validate_sql returned VALID. If it
+10. Validation — call validate_sql on the query. If INVALID, fix and
+    re-validate before proceeding. Do not call run_sql on an unvalidated query.
+11. Execution — call run_sql only after validate_sql returned VALID. If it
     errors, read the error and correct the query, then re-validate.
-11. Result interpretation — answer the user's actual question in plain
+12. Result interpretation — answer the user's actual question in plain
     language based on the real returned rows. Don't just dump the raw result.
-12. Chart output — after step 10, if the user asked for any kind of chart
+13. Chart output — after step 10, if the user asked for any kind of chart
     (bar chart, bar graph, pie chart, breakdown, distribution, share, etc.),
     follow the chart skill guidance that has been automatically provided to
     you in your context. The skill specifies the exact output format including
