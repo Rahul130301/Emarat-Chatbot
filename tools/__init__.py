@@ -7,3 +7,5 @@ from .validation import validate_sql
 from .document_lookup import get_contract_document
 from .graph_schema_search import search_schema_graph
 from .check_ontology import check_ontology
+from .function_search import find_query_function
+from .query_execution import run_query_function

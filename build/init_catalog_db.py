@@ -38,6 +38,14 @@ CREATE TABLE IF NOT EXISTS example_sql_catalog (
     sql TEXT NOT NULL,
     embedding TEXT
 );
+
+CREATE TABLE IF NOT EXISTS function_catalog (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    function_name TEXT NOT NULL,
+    description TEXT NOT NULL,
+    parameters_json TEXT NOT NULL,
+    embedding TEXT
+);
 """
  
 def init():

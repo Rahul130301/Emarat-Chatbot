@@ -1,6 +1,6 @@
 # Emarat Chatbot
 
-Text-to-SQL and contract-document assistant built on the Microsoft Agent Framework. It answers natural-language questions against Microsoft Fabric warehouses (contracts/sales + aviation uplifts) using a grounded tool pipeline: local SQLite catalogs for entity/schema/glossary resolution, then validated read-only SQL against Fabric.
+Text-to-SQL and contract-document assistant built on the Microsoft Agent Framework. It answers natural-language questions against Microsoft Fabric warehouses (contracts/sales + aviation uplifts) using a grounded tool pipeline: local SQLite catalogs for entity/schema/glossary/function resolution, then validated read-only SQL against Fabric.
 
 ---
 
@@ -16,8 +16,8 @@ FastAPI (api.py :8000)
 Agent (agent.py | aviation_agent.py)
         │  Azure OpenAI tool-calling loop
         ▼
-Tools ──► Local SQLite catalogs (entity / schema / glossary / examples)
-      └──► Fabric warehouse via pyodbc (schema introspection, validate, run)
+Tools ──► Local SQLite catalogs (entity / schema / glossary / examples / query functions)
+      └──► Fabric warehouse via pyodbc (schema introspection, validate, run, pre-built functions)
 ```
 
 **Two domains**
@@ -36,7 +36,9 @@ Per request, `api.py` sets the active Fabric database and catalog path via conte
 | Reasoning | `POST /chat` | Harness agent: narrated `<reasoning>` tags, todo list, full tool set including `search_example_sql` |
 | Fast | `POST /chat/fast` | Plain tool-calling agent: silent pipeline, parallel independent tool calls, skips `search_example_sql` (and `list_tables` for contracts) |
 
-Accuracy guarantees (entity resolution, schema lookup, `validate_sql` before `run_sql`) are shared; Fast only drops narration and style-aid tools.
+Accuracy guarantees (entity resolution, schema lookup, `validate_sql` before `run_sql`, or a matched pre-built query function) are shared; Fast only drops narration and style-aid tools.
+
+Both modes call `find_query_function` first. A match skips schema search and handwritten SQL; a miss continues the normal pipeline.
 
 ---
 
@@ -63,31 +65,36 @@ User question
 3. resolve_entity  →  value_catalog (+ aliases / fuzzy / embed / LLM)
     │                                                           │
     ▼                                                           │
-4. lookup_glossary_term  →  glossary_catalog (business → table/column)
+4. find_query_function  →  function_catalog (semantic + LLM pick)
+    │     MATCH → resolve entity params → run_query_function    │
+    │             → skip steps 5–12, go to answer               │
+    │     MISS  → continue below                                │
+    ▼                                                           │
+5. lookup_glossary_term  →  glossary_catalog (business → table/column)
     │                                                           │
     ▼                                                           │
-5. search_schema_graph  →  knowledge_graph (semantic join-aware schema)
+6. search_schema_graph  →  knowledge_graph (semantic join-aware schema)
     │                                                           │
     ▼                                                           │
-6. get_table_schema  →  Fabric sys.columns (exact column names/types)
+7. get_table_schema  →  Fabric sys.columns (exact column names/types)
     │                                                           │
     ▼                                                           │
-7. lookup_metric  →  glossary_catalog metrics (pre-approved SQL patterns)
+8. lookup_metric  →  glossary_catalog metrics (pre-approved SQL patterns)
     │                                                           │
     ▼                                                           │
-8. search_example_sql  →  example_sql_catalog  [Reasoning only]
+9. search_example_sql  →  example_sql_catalog  [Reasoning only]
     │                                                           │
     ▼                                                           │
-9. SQL generation (model writes SELECT using only resolved names)│
+10. SQL generation (model writes SELECT using only resolved names)│
     │                                                           │
     ▼                                                           │
-10. validate_sql  →  Fabric SELECT TOP 0 * FROM (query) AS …     │
+11. validate_sql  →  Fabric SELECT TOP 0 * FROM (query) AS …     │
     │     INVALID → fix → re-validate                           │
     ▼                                                           │
-11. run_sql  →  Fabric (read-only SELECT, max 50 rows returned)  │
+12. run_sql  →  Fabric (read-only SELECT, max 50 rows returned)  │
     │                                                           │
     ▼                                                           │
-12. Plain-language answer (+ optional json:chart via skills)    │
+13. Plain-language answer (+ optional json:chart via skills)    │
                                                             ◄───┘
 ```
 
@@ -97,15 +104,17 @@ User question
 
 ### Aviation agent
 
-Same pattern, scoped to `[dbo].[aviation-uplifts]`: resolve airline/aircraft/stand/flight entities → glossary/metric → schema → (examples in Reasoning) → `validate_sql` → `run_sql` → answer with volumes in Litres (`unit: "L"` for charts).
+Same pattern, scoped to `[dbo].[aviation-uplifts]`: resolve airline/aircraft/stand/flight entities → `find_query_function` (match short-circuits to `run_query_function`) → glossary/metric → schema → (examples in Reasoning) → `validate_sql` → `run_sql` → answer with volumes in Litres (`unit: "L"` for charts).
 
 ### Fast-mode batching
 
-Independent discovery tools are issued in the same turn:
+`find_query_function` runs first (same as Reasoning). On a miss, independent discovery tools are issued in the same turn:
 
 1. Parallel: `resolve_entity` (all entities) + `lookup_glossary_term` + `search_schema_graph`
 2. Parallel: `get_table_schema` for every relevant table
 3. Sequential only: `validate_sql` → (must be VALID) → `run_sql`
+
+On a match: `resolve_entity` for named parameters, then `run_query_function` — no `validate_sql` / `run_sql`.
 
 Optional: set `AZURE_OPENAI_FAST_DEPLOYMENT_NAME` to a smaller/faster deployment for Fast mode.
 
@@ -116,6 +125,8 @@ Optional: set `AZURE_OPENAI_FAST_DEPLOYMENT_NAME` to a smaller/faster deployment
 | Tool | Source of truth | Role |
 |------|-----------------|------|
 | `resolve_entity` | `value_catalog` + `tools/aliases.json` | Map user phrases → canonical DB values (exact → alias → fuzzy ≥0.6 → embedding ≥0.90 → LLM) |
+| `find_query_function` | `function_catalog` | Match the question to a pre-built function (embedding ≥0.80, else LLM over top 5); always first |
+| `run_query_function` | `query_functions.REGISTRY` + Fabric | Execute matched function with bound params; skips handwritten SQL / `validate_sql` |
 | `lookup_glossary_term` | `glossary_catalog` (`entry_type=term`) | Business language → table/column |
 | `lookup_metric` | `glossary_catalog` (`entry_type=metric`) | Named metric → approved SQL pattern |
 | `search_schema_graph` | `knowledge_graph` | Join-aware schema search with relationship context |
@@ -143,7 +154,9 @@ Skills under `./skills` (bar-chart, pie-chart) are loaded via `SkillsProvider` a
 
 SSE events include `text`, optional `tool_call` / `todos` (Reasoning), and end with `data: [DONE]`.
 
-On startup, `api.py` warms Fabric connection pools in a background thread so the first `validate_sql` / `run_sql` avoids a cold AAD handshake (~2.5–3s).
+On startup, `api.py` warms Fabric connection pools in a background thread so the first Fabric call (`validate_sql` / `run_sql` / `run_query_function`) avoids a cold AAD handshake (~2.5–3s).
+
+Fast mode shows an ephemeral status line for the latest tool (including “Searching for a matching function” / “Running matched function”). Reasoning mode lists those tools as steps in the Thought process panel.
 
 ---
 
@@ -213,6 +226,7 @@ python build/build_value_catalog.py --with-embeddings
 python build/build_schema_catalog.py
 python build/build_glossary_catalog.py
 python build/build_example_catalog.py
+python build/build_function_catalog.py
 ```
 
 ### Aviation operations
@@ -223,7 +237,10 @@ python build/build_aviation_value_catalog.py
 python build/build_aviation_schema_catalog.py
 python build/build_aviation_glossary_catalog.py
 python build/build_aviation_example_catalog.py
+python build/build_function_catalog.py
 ```
+
+`build_function_catalog.py` indexes both warehouses in one run (it walks `REGISTRY`). After `init_*`, run it whenever you add or change functions in `query_functions.py`.
 
 Or the unified builder: `python build_aviation_catalog.py`
 
