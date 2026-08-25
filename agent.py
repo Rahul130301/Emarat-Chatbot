@@ -8,7 +8,7 @@ from tools import (
     list_tables, get_table_schema, run_sql,
     resolve_entity, lookup_glossary_term, lookup_metric,
     search_example_sql, validate_sql,
-    get_contract_document, search_schema_graph,
+    search_contract_clauses, search_schema_graph,
     find_query_function, run_query_function
 )
 
@@ -18,7 +18,7 @@ TOOLS = [
     list_tables, get_table_schema, run_sql,
     resolve_entity, lookup_glossary_term, lookup_metric,
     search_schema_graph, search_example_sql, validate_sql,
-    get_contract_document, find_query_function, run_query_function
+    search_contract_clauses, find_query_function, run_query_function
 ]
 
 # Fast-mode tool set: drops list_tables (dead weight — never referenced in
@@ -35,7 +35,7 @@ FAST_TOOLS = [
     get_table_schema, run_sql,
     resolve_entity, lookup_glossary_term, lookup_metric,
     search_schema_graph, validate_sql,
-    get_contract_document, find_query_function, run_query_function
+    search_contract_clauses, find_query_function, run_query_function
 ]
 
 # ---------------------------------------------------------------------------
@@ -108,18 +108,32 @@ STRUCTURED MODE:
     Never output both chart types for the same question.
 
 DOCUMENT MODE:
-2d. Identify which company/contract the question refers to.
-3d. Call resolve_entity on the company name if it's not an exact match to a
-    known value.
-4d. Find the contract_id: call run_sql (SELECT contract_id FROM contracts
-    WHERE company_name = '<resolved value>') — validate_sql first, same as
-    STRUCTURED mode. If more than one contract_id comes back, ask the user
-    which one they mean rather than guessing.
-5d. Call get_contract_document with that contract_id.
-6d. Answer strictly from the returned document text — quote or closely
-    paraphrase the actual relevant clause, name which document/contract it
-    came from. If the document doesn't address what was asked, say so
-    plainly — never infer a clause that isn't actually written in the text.
+2d. Identify whether the question is about ONE specific contract/company, or
+    is cross-document (e.g. "which contracts have an unusual termination
+    clause", "compare liability terms across our contracts").
+3d. If it's about one specific contract/company:
+    - Call resolve_entity on the company name if it's not an exact match to
+      a known value.
+    - Find the contract_id: call run_sql (SELECT contract_id FROM contracts
+      WHERE company_name = '<resolved value>') — validate_sql first, same as
+      STRUCTURED mode. If more than one contract_id comes back, ask the user
+      which one they mean rather than guessing.
+    - Call search_contract_clauses with that contract_id and a query
+      describing the clause/topic asked about.
+    If it's cross-document (no single company/contract named), call
+    search_contract_clauses with no contract_id — it searches across every
+    contract's document and returns which contract each result came from.
+4d. If the question needs the ENTIRE document rather than one clause (e.g.
+    "summarize this contract", "list every clause in the Acme agreement") —
+    after resolving contract_id as above, call search_contract_clauses with
+    full_document=True instead of a query.
+5d. Answer strictly from the returned chunk text — quote or closely
+    paraphrase the actual relevant clause, and name which document/contract
+    it came from (every result includes contract_id and document_name —
+    always cite these, especially for cross-document results, since more
+    than one contract may be involved in the answer). If nothing returned
+    addresses what was asked, say so plainly — never infer a clause that
+    isn't actually in the returned text.
 
 HYBRID MODE:
 2h. Run the STRUCTURED sub-flow (steps 2-10 above) to get the filtered list
