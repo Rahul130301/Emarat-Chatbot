@@ -75,6 +75,47 @@ compare_clients = QueryFunction(
     build=_build_compare_clients,
 )
 
+# --- CONTRACT DOMAIN — additions ---
+
+def _build_renewal_rate(p):
+    sql = ("SELECT 100.0 * SUM(CASE WHEN renewal_type = 'Auto-renew' THEN 1 ELSE 0 END) / COUNT(*) "
+           "AS renewal_rate_percent, COUNT(*) AS total_contracts FROM contracts")
+    return sql, []
+
+renewal_rate = QueryFunction(
+    name="renewal_rate",
+    description="Percentage of contracts with auto-renewal, across all contracts.",
+    parameters={},
+    build=_build_renewal_rate,
+)
+
+
+def _build_top_clients(p):
+    top_n = int(p.get("top_n", 10))
+    sql = ("SELECT TOP (?) company_name, SUM(revenue_amount) AS total_revenue "
+           "FROM sales GROUP BY company_name ORDER BY total_revenue DESC")
+    return sql, [top_n]
+
+top_clients = QueryFunction(
+    name="top_clients",
+    description="Companies ranked by total sales revenue, highest first.",
+    parameters={"top_n": {"required": False, "type": "integer", "description": "How many companies to return (default 10)."}},
+    build=_build_top_clients,
+)
+
+
+def _build_contracts_expiring_soon(p):
+    days_ahead = int(p.get("days_ahead", 90))
+    sql = ("SELECT contract_id, company_name, end_date, contract_value FROM contracts "
+           "WHERE status = 'Active' AND end_date BETWEEN GETDATE() AND DATEADD(day, ?, GETDATE())")
+    return sql, [days_ahead]
+
+contracts_expiring_soon = QueryFunction(
+    name="contracts_expiring_soon",
+    description="Active contracts ending within a given number of days from today (default 90).",
+    parameters={"days_ahead": {"required": False, "type": "integer", "description": "How many days ahead to look (default 90)."}},
+    build=_build_contracts_expiring_soon,
+)
 
 # ---------------------------------------------------------------------
 # AVIATION DOMAIN
@@ -127,6 +168,63 @@ compare_airlines = QueryFunction(
     build=_build_compare_airlines,
 )
 
+# --- AVIATION DOMAIN — additions ---
+
+def _build_fuel_volume_by_aircraft_type(p):
+    conditions, values = [], []
+    if p.get("date_from"):
+        conditions.append("Date >= ?"); values.append(p["date_from"])
+    if p.get("date_to"):
+        conditions.append("Date <= ?"); values.append(p["date_to"])
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = (f"SELECT AircraftType, SUM(Volume) AS total_litres, COUNT(*) AS flight_count "
+           f"FROM [dbo].[aviation-uplifts] {where} GROUP BY AircraftType ORDER BY total_litres DESC")
+    return sql, values
+
+fuel_volume_by_aircraft_type = QueryFunction(
+    name="fuel_volume_by_aircraft_type",
+    description="Fuel volume (Litres) uplifted, broken down by aircraft fleet type, optionally filtered by date range.",
+    parameters={
+        "date_from": {"required": False, "type": "string", "description": "Only flights on/after this date (YYYY-MM-DD)."},
+        "date_to": {"required": False, "type": "string", "description": "Only flights on/before this date (YYYY-MM-DD)."},
+    },
+    build=_build_fuel_volume_by_aircraft_type,
+)
+
+
+def _build_busiest_stands(p):
+    top_n = int(p.get("top_n", 10))
+    sql = ("SELECT TOP (?) Stand, COUNT(*) AS flight_count, SUM(Volume) AS total_litres "
+           "FROM [dbo].[aviation-uplifts] GROUP BY Stand ORDER BY total_litres DESC")
+    return sql, [top_n]
+
+busiest_stands_by_volume = QueryFunction(
+    name="busiest_stands_by_volume",
+    description="Parking stands ranked by total fuel volume uplifted, highest first.",
+    parameters={"top_n": {"required": False, "type": "integer", "description": "How many stands to return (default 10)."}},
+    build=_build_busiest_stands,
+)
+
+
+def _build_total_flight_movements(p):
+    conditions, values = [], []
+    if p.get("date_from"):
+        conditions.append("Date >= ?"); values.append(p["date_from"])
+    if p.get("date_to"):
+        conditions.append("Date <= ?"); values.append(p["date_to"])
+    where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+    sql = f"SELECT COUNT(*) AS total_movements FROM [dbo].[aviation-uplifts] {where}"
+    return sql, values
+
+total_flight_movements = QueryFunction(
+    name="total_flight_movements",
+    description="Total count of flight refueling operations/movements, optionally filtered by date range.",
+    parameters={
+        "date_from": {"required": False, "type": "string", "description": "Only flights on/after this date (YYYY-MM-DD)."},
+        "date_to": {"required": False, "type": "string", "description": "Only flights on/before this date (YYYY-MM-DD)."},
+    },
+    build=_build_total_flight_movements,
+)
 
 # ---------------------------------------------------------------------
 # REGISTRY — extend by adding more QueryFunction entries above and here
@@ -136,10 +234,16 @@ REGISTRY = {
     "contract-warehouse": {
         "total_contract_value": total_contract_value,
         "compare_clients": compare_clients,
+        "renewal_rate": renewal_rate,
+        "top_clients": top_clients,
+        "contracts_expiring_soon": contracts_expiring_soon,
     },
     "aviation-warehouse": {
         "total_fuel_volume": total_fuel_volume,
         "compare_airlines": compare_airlines,
+        "fuel_volume_by_aircraft_type": fuel_volume_by_aircraft_type,
+        "busiest_stands_by_volume": busiest_stands_by_volume,
+        "total_flight_movements": total_flight_movements,
     },
 }
 

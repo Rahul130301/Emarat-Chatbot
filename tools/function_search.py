@@ -4,19 +4,12 @@ from typing import Annotated
 from pydantic import Field
 from agent_framework import tool
 from db import get_current_database
-from db_catalog import get_catalog_connection, get_aviation_catalog_connection
-from embedding_utils import embed, embedding_from_json
-from similarity_utils import cosine_similarity
-from tools.glossary import llm_pick  # reuse the same LLM-tiebreak helper
+from cosmos_catalog_db import get_container
+from embedding_utils import embed
+from tools.glossary import llm_pick
 
 SEMANTIC_ACCEPT = 0.80
 TOP_K = 5
-
-CATALOG_CONNECTIONS = {
-    "contract-warehouse": get_catalog_connection,
-    "aviation-warehouse": get_aviation_catalog_connection,
-}
-
 
 @tool(approval_mode="never_require")
 def find_query_function(
@@ -30,36 +23,40 @@ def find_query_function(
     call search_schema_graph/validate_sql/run_sql for this question. If it
     says no function matches, proceed to the normal pipeline."""
     database = get_current_database()
-    conn = CATALOG_CONNECTIONS[database]()
-    cur = conn.cursor()
-    cur.execute("SELECT function_name, description, parameters_json, embedding FROM function_catalog")
-    rows = cur.fetchall()
-    conn.close()
+    container = get_container("function_catalog")
+    query_vec = embed(question)
 
-    if not rows:
+    results = list(container.query_items(
+        query="""
+            SELECT TOP @k c.function_name, c.description, c.parameters,
+                   VectorDistance(c.embedding, @qv) AS score
+            FROM c
+            WHERE c.database = @db
+            ORDER BY VectorDistance(c.embedding, @qv)
+        """,
+        parameters=[
+            {"name": "@k", "value": TOP_K},
+            {"name": "@qv", "value": query_vec},
+            {"name": "@db", "value": database},
+        ],
+        partition_key=database,
+    ))
+
+    if not results:
         return "No query functions defined for this domain."
 
-    query_vec = embed(question)
-    scored = []
-    for name, desc, params_json, emb_json in rows:
-        sim = cosine_similarity(query_vec, embedding_from_json(emb_json))
-        scored.append((name, desc, params_json, sim))
-    scored.sort(key=lambda r: r[3], reverse=True)
-
-    top = scored[0]
-    if top[3] >= SEMANTIC_ACCEPT:
-        matched_name, matched_desc, matched_params_json = top[0], top[1], top[2]
+    if results[0]["score"] >= SEMANTIC_ACCEPT:
+        top = results[0]
     else:
-        candidates = [(n, d) for n, d, _, _ in scored[:TOP_K]]
+        candidates = [(r["function_name"], r["description"]) for r in results]
         picked_desc = llm_pick("query function", question, candidates)
         if not picked_desc:
             return "No pre-built function matches this question. Proceed with the normal schema/SQL pipeline."
-        match = next((n, d, p) for n, d, p, _ in scored if d == picked_desc)
-        matched_name, matched_desc, matched_params_json = match
+        top = next(r for r in results if r["description"] == picked_desc)
 
-    params = json.loads(matched_params_json)
+    params = top["parameters"]
     param_list = ", ".join(f"{k}{'*' if v.get('required') else ''}" for k, v in params.items())
-    return (f"Matched function: {matched_name} — {matched_desc}\n"
-            f"Parameters ({param_list}; * = required): {matched_params_json}\n"
+    return (f"Matched function: {top['function_name']} — {top['description']}\n"
+            f"Parameters ({param_list}; * = required): {json.dumps(params)}\n"
             f"Resolve any entity values with resolve_entity, then call run_query_function "
-            f"with function_name='{matched_name}'.")
+            f"with function_name='{top['function_name']}'.")
