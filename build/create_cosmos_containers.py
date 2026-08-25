@@ -29,7 +29,7 @@ def _indexing_policy():
         "vectorIndexes": [{"path": "/embedding", "type": "quantizedFlat"}],
     }
 
-CONTAINERS = ["value_catalog", "glossary_catalog", "example_sql_catalog"]
+CONTAINERS = ["value_catalog", "glossary_catalog", "example_sql_catalog", "function_catalog"]
 
 def main():
     db = get_cosmos_database()
