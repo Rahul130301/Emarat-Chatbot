@@ -11,7 +11,15 @@ function App() {
     // Check for existing session in localStorage
     const storedSession = localStorage.getItem('chat_session_id');
     const storedActivity = localStorage.getItem('chat_last_activity');
-    
+    const storedUsername = localStorage.getItem('chat_username');
+
+    // If username is missing (session created before username tracking was added),
+    // clear the session so the user logs in fresh and username gets properly stored.
+    if (storedSession && !storedUsername) {
+      handleLogout();
+      return;
+    }
+
     if (storedSession && storedActivity) {
       const timeSinceActivity = Date.now() - parseInt(storedActivity, 10);
       if (timeSinceActivity < SESSION_TIMEOUT_MS) {
@@ -44,7 +52,7 @@ function App() {
   useEffect(() => {
     // Global activity tracker to keep session alive during reading/mouse movement
     if (!sessionId) return;
-    
+
     let throttleTimeout: NodeJS.Timeout | null = null;
     const handleGlobalActivity = () => {
       if (!throttleTimeout) {
@@ -67,19 +75,14 @@ function App() {
     };
   }, [sessionId]);
 
-  const handleLogin = (newSessionId: string) => {
+  const handleLogin = (newSessionId: string, username: string) => {
     const now = Date.now();
     setSessionId(newSessionId);
     localStorage.setItem('chat_session_id', newSessionId);
     localStorage.setItem('chat_last_activity', now.toString());
     localStorage.setItem('sidebar_visible', 'true');
-
-    // Add to sessions registry if not exists
-    const sessions = JSON.parse(localStorage.getItem('chat_sessions') || '[]');
-    if (!sessions.find((s: any) => s.id === newSessionId)) {
-      sessions.unshift({ id: newSessionId, title: 'New Chat', titles: {}, updatedAt: now });
-      localStorage.setItem('chat_sessions', JSON.stringify(sessions));
-    }
+    // Store username so we can create new sessions under the correct user
+    localStorage.setItem('chat_username', username);
   };
 
   const handleLogout = () => {
@@ -87,26 +90,20 @@ function App() {
     localStorage.removeItem('chat_session_id');
     localStorage.removeItem('chat_last_activity');
     localStorage.removeItem('sidebar_visible');
-    // Clear all history
-    const sessions = JSON.parse(localStorage.getItem('chat_sessions') || '[]');
-    sessions.forEach((s: any) => {
-      localStorage.removeItem(`chat_history_${s.id}`);
-      localStorage.removeItem(`chat_history_${s.id}_contracts`);
-      localStorage.removeItem(`chat_history_${s.id}_aviation`);
-    });
-    localStorage.removeItem('chat_sessions');
+    localStorage.removeItem('chat_username');
   };
 
   const handleNewChat = async () => {
     try {
-      const res = await fetch('http://localhost:8000/login', {
+      const username = localStorage.getItem('chat_username') || 'user';
+      const res = await fetch('http://localhost:8000/sessions', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username: "user", password: "newchat" })
+        body: JSON.stringify({ username, title: 'New Chat' })
       });
       const data = await res.json();
       if (data.session_id) {
-        handleLogin(data.session_id);
+        handleLogin(data.session_id, username);
       }
     } catch (e) {
       console.error("Failed to start new chat", e);
@@ -122,11 +119,11 @@ function App() {
   return (
     <>
       {sessionId ? (
-        <Chat 
+        <Chat
           key={sessionId}
-          sessionId={sessionId} 
-          onLogout={handleLogout} 
-          onActivity={updateActivity} 
+          sessionId={sessionId}
+          onLogout={handleLogout}
+          onActivity={updateActivity}
           onNewChat={handleNewChat}
           onSwitchSession={handleSwitchSession}
         />

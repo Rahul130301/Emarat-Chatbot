@@ -365,6 +365,21 @@ body {
   color: var(--primary);
 }
 
+.session-menu-btn {
+  opacity: 0;
+  transition: opacity 0.2s, background-color 0.2s;
+}
+
+.session-row:hover .session-menu-btn,
+.session-menu-btn.open {
+  opacity: 1;
+}
+
+.session-menu-btn:hover {
+  background-color: rgba(255, 255, 255, 0.1) !important;
+}
+
+
 .faq-list {
   display: flex;
   flex-direction: column;

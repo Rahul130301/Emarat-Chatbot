@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { LogIn } from 'lucide-react';
 
 interface LoginProps {
-  onLogin: (sessionId: string) => void;
+  onLogin: (sessionId: string, username: string) => void;
 }
 
 export default function Login({ onLogin }: LoginProps) {
@@ -17,6 +17,7 @@ export default function Login({ onLogin }: LoginProps) {
     setIsLoading(true);
 
     try {
+      // Step 1: Validate credentials
       const res = await fetch('http://localhost:8000/login', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -24,12 +25,43 @@ export default function Login({ onLogin }: LoginProps) {
       });
 
       const data = await res.json();
-      
-      if (res.ok && data.session_id) {
-        onLogin(data.session_id);
-      } else {
+
+      if (!res.ok) {
         setError(data.detail || 'Login failed. Please try again.');
+        return;
       }
+
+      // Step 2: Check if the user has any existing sessions in Cosmos DB
+      const sessionsRes = await fetch(
+        `http://localhost:8000/sessions?username=${encodeURIComponent(username)}`
+      );
+      const existingSessions = await sessionsRes.json();
+
+      let sessionId: string;
+
+      if (Array.isArray(existingSessions) && existingSessions.length > 0) {
+        // Returning user — resume the most recent session (already sorted newest-first)
+        sessionId = existingSessions[0].id;
+
+        // Register this session in the backend's in-memory store so chat works
+        await fetch('http://localhost:8000/sessions/register', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, session_id: sessionId })
+        });
+      } else {
+        // First-time user — create a brand new session
+        const newSessionRes = await fetch('http://localhost:8000/sessions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ username, title: 'New Chat' })
+        });
+        const newSession = await newSessionRes.json();
+        sessionId = newSession.session_id;
+      }
+
+      onLogin(sessionId, username);
+
     } catch (err) {
       setError('Could not connect to the server.');
     } finally {
@@ -44,7 +76,7 @@ export default function Login({ onLogin }: LoginProps) {
           <h1>Welcome Back</h1>
           <p>Login to your Emarat account</p>
         </div>
-        
+
         {error && <div className="error-message">{error}</div>}
 
         <form onSubmit={handleSubmit}>
@@ -60,7 +92,7 @@ export default function Login({ onLogin }: LoginProps) {
               required
             />
           </div>
-          
+
           <div className="form-group">
             <label htmlFor="password">Password</label>
             <input
@@ -73,7 +105,7 @@ export default function Login({ onLogin }: LoginProps) {
               required
             />
           </div>
-          
+
           <button type="submit" className="btn" style={{ width: '100%', marginTop: '1rem' }} disabled={isLoading}>
             {isLoading ? 'Signing in...' : (
               <>

@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,15 +17,57 @@ from db_catalog import set_current_catalog_path
 from agent import build_reasoning_agent as build_contracts_reasoning_agent, build_fast_agent as build_contracts_fast_agent
 from aviation_agent import build_aviation_reasoning_agent, build_aviation_fast_agent
 from agent_framework._harness._todo import TodoSessionStore
+import cosmos_db
 
-app = FastAPI()
+contracts_reasoning_agent = None
+contracts_fast_agent = None
+aviation_reasoning_agent = None
+aviation_fast_agent = None
 
-# Kick off the Fabric AAD handshake (~2.5-3s per connection) for both
-# warehouses the moment the process starts, in the background, so the pool
-# already has live connections ready before the first user query ever hits
-# run_sql/get_table_schema/etc. This never blocks server startup — requests
-# that arrive before it finishes just connect on-demand as before.
-threading.Thread(target=warmup_connections, name="db-warmup", daemon=True).start()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # --- Startup ---
+    # Warm up DB connections in the background
+    threading.Thread(target=warmup_connections, name="db-warmup", daemon=True).start()
+
+    # Connect to Cosmos DB (creates containers if they don't exist)
+    await cosmos_db.init_cosmos()
+
+    # Build agents
+    global contracts_reasoning_agent, contracts_fast_agent
+    global aviation_reasoning_agent, aviation_fast_agent
+
+    try:
+        contracts_reasoning_agent = build_contracts_reasoning_agent()
+    except Exception as e:
+        print(f"Warning: Could not build contracts reasoning agent on startup: {e}")
+        contracts_reasoning_agent = None
+
+    try:
+        contracts_fast_agent = build_contracts_fast_agent()
+    except Exception as e:
+        print(f"Warning: Could not build contracts fast agent on startup: {e}")
+        contracts_fast_agent = None
+
+    try:
+        aviation_reasoning_agent = build_aviation_reasoning_agent()
+    except Exception as e:
+        print(f"Warning: Could not build aviation reasoning agent on startup: {e}")
+        aviation_reasoning_agent = None
+
+    try:
+        aviation_fast_agent = build_aviation_fast_agent()
+    except Exception as e:
+        print(f"Warning: Could not build aviation fast agent on startup: {e}")
+        aviation_fast_agent = None
+
+    yield
+
+    # --- Shutdown ---
+    await cosmos_db.close_cosmos()
+
+
+app = FastAPI(lifespan=lifespan)
 
 # Allow CORS for frontend
 app.add_middleware(
@@ -35,32 +78,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Contracts Agent variants
-try:
-    contracts_reasoning_agent = build_contracts_reasoning_agent()
-except Exception as e:
-    print(f"Warning: Could not build contracts reasoning agent on startup: {e}")
-    contracts_reasoning_agent = None
-
-try:
-    contracts_fast_agent = build_contracts_fast_agent()
-except Exception as e:
-    print(f"Warning: Could not build contracts fast agent on startup: {e}")
-    contracts_fast_agent = None
-
-# Initialize Aviation Agent variants
-try:
-    aviation_reasoning_agent = build_aviation_reasoning_agent()
-except Exception as e:
-    print(f"Warning: Could not build aviation reasoning agent on startup: {e}")
-    aviation_reasoning_agent = None
-
-try:
-    aviation_fast_agent = build_aviation_fast_agent()
-except Exception as e:
-    print(f"Warning: Could not build aviation fast agent on startup: {e}")
-    aviation_fast_agent = None
-
+# In-memory session store: caches agent session objects per session_id
+# (Cosmos DB handles the persistent message history; this is just for the live LLM context)
 sessions = {}
 SESSION_TIMEOUT = 30 * 60  # 30 minutes
 
@@ -78,16 +97,10 @@ class ChatRequest(BaseModel):
 
 @app.post("/login")
 async def login(req: LoginRequest):
+    """Validate credentials. Does NOT create a new session — the frontend decides
+    whether to resume an existing session or create a fresh one."""
     if req.username and req.password:
-        session_id = str(uuid.uuid4())
-        sessions[session_id] = {
-            "obj_contracts_reasoning": None,
-            "obj_contracts_fast": None,
-            "obj_aviation_reasoning": None,
-            "obj_aviation_fast": None,
-            "last_active": time.time(),
-        }
-        return {"session_id": session_id, "expires_in": SESSION_TIMEOUT}
+        return {"username": req.username, "message": "ok"}
     raise HTTPException(status_code=401, detail="Invalid credentials")
 
 
@@ -102,9 +115,88 @@ async def logout(req: Request):
     return {"status": "ok"}
 
 
+@app.get("/sessions")
+async def get_sessions(username: str):
+    """Return all past sessions for this user from Cosmos DB."""
+    return await cosmos_db.get_user_sessions(user_id=username)
+
+
+class NewSessionRequest(BaseModel):
+    username: str
+    title: str = "New Chat"
+
+
+@app.post("/sessions")
+async def create_new_session(req: NewSessionRequest):
+    """Create a new chat session in Cosmos DB and register it in memory."""
+    session_id = await cosmos_db.create_session(
+        user_id=req.username,
+        title=req.title
+    )
+    sessions[session_id] = {
+        "username": req.username,
+        "obj_contracts_reasoning": None,
+        "obj_contracts_fast": None,
+        "obj_aviation_reasoning": None,
+        "obj_aviation_fast": None,
+        "last_active": time.time(),
+    }
+    return {"session_id": session_id}
+
+
+@app.get("/sessions/{session_id}/history")
+async def get_session_history(session_id: str):
+    """Return all messages for a given session from Cosmos DB."""
+    return await cosmos_db.get_session_messages(session_id=session_id)
+
+
+class RegisterSessionRequest(BaseModel):
+    username: str
+    session_id: str
+
+
+@app.post("/sessions/register")
+async def register_session(req: RegisterSessionRequest):
+    """Register an existing Cosmos DB session into the in-memory store.
+    Called when a returning user logs in and resumes their most recent session.
+    """
+    if req.session_id not in sessions:
+        sessions[req.session_id] = {
+            "username": req.username,
+            "obj_contracts_reasoning": None,
+            "obj_contracts_fast": None,
+            "obj_aviation_reasoning": None,
+            "obj_aviation_fast": None,
+            "last_active": time.time(),
+        }
+    else:
+        sessions[req.session_id]["last_active"] = time.time()
+    return {"status": "ok"}
+
+
+@app.delete("/sessions/{session_id}")
+async def delete_session(session_id: str, username: str):
+    """Delete a session and all its messages from Cosmos DB."""
+    # Remove from in-memory store
+    if session_id in sessions:
+        del sessions[session_id]
+    # Remove from Cosmos DB
+    await cosmos_db.delete_session(session_id=session_id, user_id=username)
+    return {"status": "deleted"}
+
+
+
 def _get_session_data(session_id: str):
     if session_id not in sessions:
-        raise HTTPException(status_code=401, detail="Session expired or invalid")
+        # Session not in memory (e.g., server restarted) — recreate wrapper
+        sessions[session_id] = {
+            "username": "unknown",
+            "obj_contracts_reasoning": None,
+            "obj_contracts_fast": None,
+            "obj_aviation_reasoning": None,
+            "obj_aviation_fast": None,
+            "last_active": time.time(),
+        }
     session_data = sessions[session_id]
     if time.time() - session_data["last_active"] > SESSION_TIMEOUT:
         del sessions[session_id]
@@ -114,30 +206,41 @@ def _get_session_data(session_id: str):
 
 
 def _get_session_obj(session_data: dict, agent, obj_key: str):
-    """Lazily create (and cache) the per-agent session object. Note: the
-    reasoning and fast agents are two different Agent instances, so they
-    each need their own session/conversation-thread object — switching the
-    toggle mid-conversation starts that mode's own thread rather than
-    sharing history with the other mode."""
+    """Lazily create (and cache) the per-agent session object."""
     if session_data[obj_key] is None and agent is not None:
         session_data[obj_key] = agent.create_session()
     return session_data[obj_key]
 
 
-async def _stream_chat(agent, session_obj, message: str, is_harness: bool, agent_type: str = "contracts"):
-    """Shared SSE generator for both the reasoning and fast agents.
-
-    is_harness controls two harness-only behaviors that the plain fast
-    agent doesn't have: (1) todo-list syncing, and (2) emitting the
-    <reasoning><tool_call .../></reasoning> text markers that the frontend's
-    "Thought process" panel parses.
-    """
+async def _stream_chat(agent, session_obj, session_id: str, message: str, is_harness: bool, agent_type: str = "contracts"):
+    """Shared SSE generator. Saves user + assistant messages to Cosmos DB around the stream."""
     if agent_type == "aviation":
         set_current_database(os.environ.get("FABRIC_AVIATION_DATABASE", "aviation-warehouse"))
         set_current_catalog_path(os.environ.get("AVIATION_CATALOG_DB_PATH", "./aviation_catalog.db"))
     else:
         set_current_database(os.environ.get("FABRIC_DATABASE", "contract-warehouse"))
         set_current_catalog_path(os.environ.get("CATALOG_DB_PATH", "./catalog.db"))
+
+    # Persist user message to Cosmos DB before streaming the response
+    await cosmos_db.save_message(
+        session_id=session_id,
+        role="user",
+        content=message,
+        agent_type=agent_type
+    )
+
+    # Update the session title in Cosmos DB from the user's message text.
+    # This ensures the sidebar shows a meaningful title on next login instead of "New Chat".
+    username = sessions.get(session_id, {}).get("username", "")
+    if username and username != "unknown":
+        title = message[:30] + ("..." if len(message) > 30 else "")
+        try:
+            await cosmos_db.update_session_title(session_id, username, title)
+        except Exception as e:
+            print(f"Could not update session title: {e}")
+
+    full_text = ""
+    tool_calls_seen: list[str] = []
 
     try:
         stream = await agent.run(message, session=session_obj, stream=True)
@@ -147,10 +250,13 @@ async def _stream_chat(agent, session_obj, message: str, is_harness: bool, agent
                     if content.type in ["function_call", "mcp_server_tool_call"]:
                         name = getattr(content, "name", None) or getattr(content, "tool_name", None)
                         if name:
-                            if is_harness:
-                                yield f"data: {json.dumps({'text': f'<reasoning><tool_call name=\"{name}\" /></reasoning>', 'tool_call': name})}\n\n"
-                            else:
-                                yield f"data: {json.dumps({'tool_call': name})}\n\n"
+                            # Prevent appending the same tool name multiple times during a stream
+                            if not tool_calls_seen or tool_calls_seen[-1] != name:
+                                tool_calls_seen.append(name)
+                                if is_harness:
+                                    yield f"data: {json.dumps({'text': f'<reasoning><tool_call name=\"{name}\" /></reasoning>', 'tool_call': name})}\n\n"
+                                else:
+                                    yield f"data: {json.dumps({'tool_call': name})}\n\n"
 
                     if is_harness and content.type in [
                         "function_call", "function_result",
@@ -175,6 +281,7 @@ async def _stream_chat(agent, session_obj, message: str, is_harness: bool, agent
                             pass
 
             if hasattr(update, "text") and update.text:
+                full_text += update.text
                 yield f"data: {json.dumps({'text': update.text})}\n\n"
 
         if is_harness:
@@ -195,9 +302,21 @@ async def _stream_chat(agent, session_obj, message: str, is_harness: bool, agent
                     yield f"data: {json.dumps({'todos': todos})}\n\n"
             except Exception:
                 pass
+
     except Exception as inner_e:
         print(f"Error during streaming: {inner_e}")
         yield f"data: {json.dumps({'error': 'An error occurred while streaming the response.'})}\n\n"
+
+    # Persist the completed assistant response to Cosmos DB
+    if full_text:
+        await cosmos_db.save_message(
+            session_id=session_id,
+            role="assistant",
+            content=full_text,
+            agent_type=agent_type,
+            tool_calls=tool_calls_seen if tool_calls_seen else None,
+            mode="reasoning" if is_harness else "fast"
+        )
 
     yield "data: [DONE]\n\n"
 
@@ -213,7 +332,7 @@ def _chat_response(agent, obj_key: str, is_harness: bool, req: ChatRequest):
 
     session_obj = _get_session_obj(session_data, agent, obj_key)
     return StreamingResponse(
-        _stream_chat(agent, session_obj, req.message, is_harness, req.agent_type),
+        _stream_chat(agent, session_obj, req.session_id, req.message, is_harness, req.agent_type),
         media_type="text/event-stream",
     )
 

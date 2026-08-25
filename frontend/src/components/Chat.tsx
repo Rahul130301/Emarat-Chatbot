@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Send, LogOut, Plus, PlaneTakeoff, Plane, Fuel, FileText, BarChart2, MessageSquare, ChevronDown, Layers, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Send, LogOut, Plus, PlaneTakeoff, Plane, Fuel, FileText, BarChart2, MessageSquare, ChevronDown, Layers, PanelLeftClose, PanelLeftOpen, MoreVertical, Trash2 } from 'lucide-react';
 
 interface ChatProps {
   sessionId: string;
@@ -185,7 +185,7 @@ const formatVal = (v: number, unit?: string) => {
   const isCurrency = unit === '$';
   const abbrev = v >= 1_000_000 ? `${(v / 1_000_000).toFixed(1)}M`
     : v >= 1_000 ? `${(v / 1_000).toFixed(1)}k`
-    : v.toLocaleString();
+      : v.toLocaleString();
   if (isCurrency) return `$${abbrev}`;
   if (unit) return `${abbrev} ${unit}`;
   return abbrev;
@@ -856,15 +856,91 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
 
   const currentConfig = AGENT_CONFIGS[activeAgent];
 
-  const [messages, setMessages] = useState<Message[]>(() => {
-    const saved = localStorage.getItem(`chat_history_${sessionId}_${activeAgent}`);
-    if (saved) return JSON.parse(saved);
-    return [{ id: '1', text: currentConfig.welcomeMessage, sender: 'assistant' }];
-  });
+  const [messages, setMessages] = useState<Message[]>([{ id: '1', text: currentConfig.welcomeMessage, sender: 'assistant' }]);
+  const [sessions, setSessions] = useState<SessionMeta[]>([]);
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
 
-  const [sessions, setSessions] = useState<SessionMeta[]>(() => {
-    return JSON.parse(localStorage.getItem('chat_sessions') || '[]');
-  });
+  const handleDeleteSession = async (e: React.MouseEvent, targetSessionId: string) => {
+    e.stopPropagation();
+    setOpenMenuId(null);
+    const username = localStorage.getItem('chat_username') || '';
+    try {
+      await fetch(
+        `http://localhost:8000/sessions/${targetSessionId}?username=${encodeURIComponent(username)}`,
+        { method: 'DELETE' }
+      );
+      // Remove from sidebar state
+      setSessions(prev => prev.filter(s => s.id !== targetSessionId));
+      // If the deleted session is the active one, open a new chat
+      if (targetSessionId === sessionId) {
+        onNewChat();
+      }
+    } catch (err) {
+      console.error('Failed to delete session', err);
+    }
+  };
+
+  // Load the user's past sessions from Cosmos DB on mount,
+  // then back-fill any "New Chat" titles from their first user message.
+  useEffect(() => {
+    const username = localStorage.getItem('chat_username');
+    if (!username) return;
+    fetch(`http://localhost:8000/sessions?username=${encodeURIComponent(username)}`)
+      .then(r => r.json())
+      .then(async (data: any[]) => {
+        if (!Array.isArray(data)) return;
+        // For sessions that still say "New Chat", fetch their first user message to get the real title
+        const enriched = await Promise.all(
+          data.map(async (s) => {
+            if (s.title && s.title !== 'New Chat') return s;
+            try {
+              const hRes = await fetch(`http://localhost:8000/sessions/${s.id}/history`);
+              const msgs: any[] = await hRes.json();
+              const firstUser = Array.isArray(msgs) ? msgs.find(m => m.role === 'user') : null;
+              if (firstUser) {
+                return { ...s, title: firstUser.content.slice(0, 30) + (firstUser.content.length > 30 ? '...' : '') };
+              }
+            } catch (_) {}
+            return s;
+          })
+        );
+        setSessions(enriched);
+      })
+      .catch(console.error);
+  }, []);
+
+  // Load message history for the current session + agent from Cosmos DB
+  useEffect(() => {
+    fetch(`http://localhost:8000/sessions/${sessionId}/history`)
+      .then(r => r.json())
+      .then((data: any[]) => {
+        if (!Array.isArray(data) || data.length === 0) {
+          setMessages([{ id: '1', text: currentConfig.welcomeMessage, sender: 'assistant' }]);
+          return;
+        }
+        // Filter to only messages for the active agent
+        const filtered = data.filter(m => m.agent_type === activeAgent);
+        if (filtered.length === 0) {
+          setMessages([{ id: '1', text: currentConfig.welcomeMessage, sender: 'assistant' }]);
+        } else {
+          setMessages(filtered.map(m => ({
+            id: m.id,
+            text: m.content,
+            sender: m.role as 'user' | 'assistant',
+            toolCalls: m.toolCalls,
+            mode: m.mode,
+          })));
+          // Immediately update this session's sidebar title from its first user message,
+          // so the title shows correctly without waiting for Cosmos DB to be queried again.
+          const firstUser = data.find(m => m.role === 'user');
+          if (firstUser) {
+            const title = firstUser.content.slice(0, 30) + (firstUser.content.length > 30 ? '...' : '');
+            setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title } : s));
+          }
+        }
+      })
+      .catch(console.error);
+  }, [sessionId, activeAgent, currentConfig.welcomeMessage]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(() => {
@@ -898,82 +974,39 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     scrollToBottom();
   }, [messages]);
 
-  const getSessionDisplayTitle = (s: SessionMeta, agent: AgentType): string => {
-    // 1. Direct from s.titles map if stored
-    if (s.titles && s.titles[agent]) {
-      return s.titles[agent]!;
-    }
-    // 2. Check localStorage history for that specific session & agent
-    try {
-      const raw = localStorage.getItem(`chat_history_${s.id}_${agent}`);
-      if (raw) {
-        const hist: Message[] = JSON.parse(raw);
-        const firstUser = hist.find(m => m.sender === 'user');
-        if (firstUser && firstUser.text) {
-          return firstUser.text.slice(0, 30) + (firstUser.text.length > 30 ? '...' : '');
-        }
-      }
-    } catch (e) {}
-
-    // 3. If it's the current active session and current messages have a user message
-    if (s.id === sessionId && activeAgent === agent) {
+  const getSessionDisplayTitle = (s: SessionMeta, _agent: AgentType): string => {
+    // Use the title stored in Cosmos DB; fall back to first user message in current session
+    if (s.title && s.title !== 'New Chat') return s.title;
+    if (s.id === sessionId) {
       const firstUser = messages.find(m => m.sender === 'user');
       if (firstUser && firstUser.text) {
         return firstUser.text.slice(0, 30) + (firstUser.text.length > 30 ? '...' : '');
       }
     }
-
-    return 'New Chat';
+    return s.title || 'New Chat';
   };
 
+  // Update the in-memory session title when the first user message appears
   useEffect(() => {
-    localStorage.setItem(`chat_history_${sessionId}_${activeAgent}`, JSON.stringify(messages));
-
-    // Update session title specifically for the current activeAgent
     const firstUserMsg = messages.find(m => m.sender === 'user');
-    if (firstUserMsg && firstUserMsg.text) {
-      const agentTitle = firstUserMsg.text.slice(0, 30) + (firstUserMsg.text.length > 30 ? '...' : '');
-      setSessions(prev => {
-        const updated = prev.map(s => {
-          if (s.id === sessionId) {
-            const updatedTitles = { ...(s.titles || {}), [activeAgent]: agentTitle };
-            return { ...s, title: agentTitle, titles: updatedTitles, updatedAt: Date.now() };
-          }
-          return s;
-        });
-        localStorage.setItem('chat_sessions', JSON.stringify(updated));
-        return updated;
-      });
-    }
-  }, [messages, sessionId, activeAgent]);
+    if (!firstUserMsg) return;
+    const agentTitle = firstUserMsg.text.slice(0, 30) + (firstUserMsg.text.length > 30 ? '...' : '');
+    setSessions(prev => prev.map(s =>
+      s.id === sessionId ? { ...s, title: agentTitle, updatedAt: Date.now() } : s
+    ));
+  }, [messages, sessionId]);
 
   const handleSwitchAgent = (newAgent: AgentType) => {
     if (newAgent === activeAgent) {
       setIsAgentMenuOpen(false);
       return;
     }
-    // Save current agent's messages
-    localStorage.setItem(`chat_history_${sessionId}_${activeAgent}`, JSON.stringify(messages));
-
-    // Switch active agent
+    // Show welcome message immediately; the history useEffect will fetch from Cosmos DB
+    const newConfig = AGENT_CONFIGS[newAgent];
+    setMessages([{ id: '1', text: newConfig.welcomeMessage, sender: 'assistant' }]);
     setActiveAgent(newAgent);
     localStorage.setItem('active_agent_type', newAgent);
     setIsAgentMenuOpen(false);
-
-    // Refresh sessions list from localStorage so titles for newAgent are immediately loaded
-    try {
-      const storedSessions = JSON.parse(localStorage.getItem('chat_sessions') || '[]');
-      setSessions(storedSessions);
-    } catch (e) {}
-
-    // Load new agent's messages
-    const newConfig = AGENT_CONFIGS[newAgent];
-    const savedNew = localStorage.getItem(`chat_history_${sessionId}_${newAgent}`);
-    if (savedNew) {
-      setMessages(JSON.parse(savedNew));
-    } else {
-      setMessages([{ id: '1', text: newConfig.welcomeMessage, sender: 'assistant' }]);
-    }
   };
 
   const sendMessage = async (textToSend: string) => {
@@ -1167,26 +1200,87 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
             </ul>
           </div>
 
-          {sessions.length > 0 && (
-            <div className="history-section">
-              <h3 className="sidebar-title">RECENT CHATS</h3>
-              <div className="history-list">
-                {sessions.map(s => {
-                  const displayTitle = getSessionDisplayTitle(s, activeAgent);
-                  return (
-                    <button
-                      key={s.id}
-                      className={`history-button ${s.id === sessionId ? 'active' : ''}`}
-                      onClick={() => onSwitchSession(s.id)}
-                    >
-                      <MessageSquare size={16} />
-                      <span>{displayTitle}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
+          {(() => {
+              // Always show current session at top; merge with past sessions from Cosmos DB
+              const currentSessionInList = sessions.find(s => s.id === sessionId);
+              const allSessions = currentSessionInList
+                ? sessions
+                : [{ id: sessionId, title: 'New Chat', updatedAt: Date.now() } as SessionMeta, ...sessions];
+              return (
+                <div className="history-section">
+                  <h3 className="sidebar-title">RECENT CHATS</h3>
+                  <div className="history-list">
+                    {allSessions.map(s => {
+                      const displayTitle = getSessionDisplayTitle(s, activeAgent);
+                      const isMenuOpen = openMenuId === s.id;
+                      return (
+                        <div
+                          key={s.id}
+                          className="session-row"
+                          style={{ position: 'relative', display: 'flex', alignItems: 'center' }}
+                          onMouseLeave={() => setOpenMenuId(null)}
+                        >
+                          <button
+                            className={`history-button ${s.id === sessionId ? 'active' : ''}`}
+                            style={{ flex: 1, paddingRight: '32px', minWidth: 0 }}
+                            onClick={() => onSwitchSession(s.id)}
+                          >
+                            <MessageSquare size={16} style={{ flexShrink: 0 }} />
+                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                              {displayTitle}
+                            </span>
+                          </button>
+
+                          {/* 3-dot menu trigger */}
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setOpenMenuId(isMenuOpen ? null : s.id); }}
+                            style={{
+                              position: 'absolute', right: '4px',
+                              background: 'transparent', border: 'none',
+                              color: s.id === sessionId ? 'var(--primary)' : '#94a3b8',
+                              cursor: 'pointer',
+                              padding: '4px', borderRadius: '4px',
+                              display: 'flex', alignItems: 'center',
+                            }}
+                            className={`session-menu-btn ${isMenuOpen ? 'open' : ''}`}
+                            title="Options"
+                          >
+                            <MoreVertical size={14} />
+                          </button>
+
+                          {/* Dropdown menu */}
+                          {isMenuOpen && (
+                            <div style={{
+                              position: 'absolute', right: '0', top: '100%', zIndex: 100,
+                              background: '#0f172a', border: '1px solid #1e293b',
+                              borderRadius: '8px', padding: '4px', minWidth: '130px',
+                              boxShadow: '0 8px 24px rgba(0,0,0,0.4)'
+                            }}>
+                              <button
+                                onClick={(e) => handleDeleteSession(e, s.id)}
+                                style={{
+                                  display: 'flex', alignItems: 'center', gap: '8px',
+                                  width: '100%', padding: '8px 10px',
+                                  background: 'transparent', border: 'none',
+                                  color: '#f87171', cursor: 'pointer',
+                                  fontSize: '0.82rem', borderRadius: '6px',
+                                  transition: 'background 0.15s'
+                                }}
+                                onMouseEnter={e => (e.currentTarget.style.background = 'rgba(248,113,113,0.1)')}
+                                onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
+                              >
+                                <Trash2 size={13} />
+                                Delete chat
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              );
+            })()}
 
           <h3 className="sidebar-title" style={{ marginTop: sessions.length > 0 ? '2.5rem' : '0' }}>TRY ASKING</h3>
           <div className="faq-list">
@@ -1271,52 +1365,52 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                         minWidth: '280px',
                         boxShadow: '0 10px 25px rgba(0,0,0,0.6)'
                       }}>
-                      <div
-                        onClick={() => handleSwitchAgent('contracts')}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '10px',
-                          padding: '8px 10px',
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                          background: activeAgent === 'contracts' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
-                          color: activeAgent === 'contracts' ? '#38bdf8' : '#cbd5e1',
-                          fontSize: '0.84rem',
-                          fontWeight: activeAgent === 'contracts' ? 600 : 400
-                        }}
-                      >
-                        <FileText size={16} color={activeAgent === 'contracts' ? '#38bdf8' : '#94a3b8'} />
-                        <div>
-                          <div>Contracts & Sales Intelligence</div>
-                          <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Client contracts, sales, rates & clauses</div>
+                        <div
+                          onClick={() => handleSwitchAgent('contracts')}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '10px',
+                            padding: '8px 10px',
+                            borderRadius: '6px',
+                            cursor: 'pointer',
+                            background: activeAgent === 'contracts' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+                            color: activeAgent === 'contracts' ? '#38bdf8' : '#cbd5e1',
+                            fontSize: '0.84rem',
+                            fontWeight: activeAgent === 'contracts' ? 600 : 400
+                          }}
+                        >
+                          <FileText size={16} color={activeAgent === 'contracts' ? '#38bdf8' : '#94a3b8'} />
+                          <div>
+                            <div>Contracts & Sales Intelligence</div>
+                            <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Client contracts, sales, rates & clauses</div>
+                          </div>
                         </div>
-                      </div>
 
-                      <div
-                        onClick={() => handleSwitchAgent('aviation')}
-                        style={{
-                          display: 'flex',
-                          alignItems: 'center',
-                          gap: '10px',
-                          padding: '8px 10px',
-                          borderRadius: '6px',
-                          cursor: 'pointer',
-                          background: activeAgent === 'aviation' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
-                          color: activeAgent === 'aviation' ? '#38bdf8' : '#cbd5e1',
-                          fontSize: '0.84rem',
-                          fontWeight: activeAgent === 'aviation' ? 600 : 400,
-                          marginTop: '2px'
-                        }}
-                      >
-                        <PlaneTakeoff size={16} color={activeAgent === 'aviation' ? '#38bdf8' : '#94a3b8'} />
-                        <div>
-                          <div>Aviation Operations & Uplift</div>
-                          <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Fuel uplifts (Litres), flights, stands & fleet</div>
+                        <div
+                          onClick={() => handleSwitchAgent('aviation')}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '10px',
+                            padding: '8px 10px',
+                            borderRadius: '6px',
+                            cursor: 'pointer',
+                            background: activeAgent === 'aviation' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+                            color: activeAgent === 'aviation' ? '#38bdf8' : '#cbd5e1',
+                            fontSize: '0.84rem',
+                            fontWeight: activeAgent === 'aviation' ? 600 : 400,
+                            marginTop: '2px'
+                          }}
+                        >
+                          <PlaneTakeoff size={16} color={activeAgent === 'aviation' ? '#38bdf8' : '#94a3b8'} />
+                          <div>
+                            <div>Aviation Operations & Uplift</div>
+                            <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Fuel uplifts (Litres), flights, stands & fleet</div>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  </>
+                    </>
                   )}
                 </div>
                 <span className="online-status"><div className="dot"></div> Online</span>
