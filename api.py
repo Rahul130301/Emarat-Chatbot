@@ -18,6 +18,7 @@ from agent import build_reasoning_agent as build_contracts_reasoning_agent, buil
 from aviation_agent import build_aviation_reasoning_agent, build_aviation_fast_agent
 from agent_framework._harness._todo import TodoSessionStore
 import cosmos_db
+from scope_gate import check_gate
 
 contracts_reasoning_agent = None
 contracts_fast_agent = None
@@ -220,6 +221,12 @@ async def _stream_chat(agent, session_obj, session_id: str, message: str, is_har
     else:
         set_current_database(os.environ.get("FABRIC_DATABASE", "contract-warehouse"))
         set_current_catalog_path(os.environ.get("CATALOG_DB_PATH", "./catalog.db"))
+
+    decline = check_gate(message, agent_type)
+    if decline:
+        yield f"data: {json.dumps({'text': decline})}\n\n"
+        yield "data: [DONE]\n\n"
+        return
 
     # Persist user message to Cosmos DB before streaming the response
     await cosmos_db.save_message(
