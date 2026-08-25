@@ -29,10 +29,7 @@ interface Message {
 interface SessionMeta {
   id: string;
   title: string;
-  titles?: {
-    contracts?: string;
-    aviation?: string;
-  };
+  titles?: Partial<Record<AgentKey, string>>;   // was: { contracts?: string; aviation?: string }
   updatedAt: number;
 }
 
@@ -790,6 +787,20 @@ const MessageFormatter = ({ text, isStreaming, todos, toolCalls, mode }: { text:
 };
 
 type AgentType = 'contracts' | 'aviation';
+type AgentMode = 'fast' | 'reasoning';
+type AgentKey = 'contracts-fast' | 'contracts-reasoning' | 'aviation-fast' | 'aviation-reasoning';
+
+const AGENT_KEY_LABELS: Record<AgentKey, string> = {
+  'contracts-fast': 'Contracts Agent — Fast',
+  'contracts-reasoning': 'Contracts Agent — Reasoning',
+  'aviation-fast': 'Aviation Agent — Fast',
+  'aviation-reasoning': 'Aviation Agent — Reasoning',
+};
+
+function parseAgentKey(key: AgentKey): { agent: AgentType; mode: AgentMode } {
+  const [agent, mode] = key.split('-') as [AgentType, AgentMode];
+  return { agent, mode };
+}
 
 interface AgentConfig {
   id: AgentType;
@@ -848,10 +859,12 @@ const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
 };
 
 export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwitchSession }: ChatProps) {
-  const [activeAgent, setActiveAgent] = useState<AgentType>(() => {
-    const saved = localStorage.getItem('active_agent_type');
-    return (saved === 'aviation' || saved === 'contracts') ? (saved as AgentType) : 'contracts';
+  const [agentKey, setAgentKey] = useState<AgentKey>(() => {
+    const saved = localStorage.getItem('active_agent_key');
+    return (saved as AgentKey) || 'contracts-fast';
   });
+  const { agent: activeAgent, mode: agentMode } = parseAgentKey(agentKey);
+  const reasoningMode = agentMode === 'reasoning';
   const [isAgentMenuOpen, setIsAgentMenuOpen] = useState(false);
 
   const currentConfig = AGENT_CONFIGS[activeAgent];
@@ -956,14 +969,6 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     });
   };
 
-  const [reasoningMode, setReasoningMode] = useState<boolean>(() => {
-    const saved = localStorage.getItem('reasoning_mode');
-    return saved === null ? true : saved === 'true';
-  });
-
-  useEffect(() => {
-    localStorage.setItem('reasoning_mode', String(reasoningMode));
-  }, [reasoningMode]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -986,27 +991,45 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     return s.title || 'New Chat';
   };
 
-  // Update the in-memory session title when the first user message appears
   useEffect(() => {
+    localStorage.setItem(`chat_history_${sessionId}_${agentKey}`, JSON.stringify(messages));
     const firstUserMsg = messages.find(m => m.sender === 'user');
-    if (!firstUserMsg) return;
-    const agentTitle = firstUserMsg.text.slice(0, 30) + (firstUserMsg.text.length > 30 ? '...' : '');
-    setSessions(prev => prev.map(s =>
-      s.id === sessionId ? { ...s, title: agentTitle, updatedAt: Date.now() } : s
-    ));
-  }, [messages, sessionId]);
+    if (firstUserMsg && firstUserMsg.text) {
+      const title = firstUserMsg.text.slice(0, 30) + (firstUserMsg.text.length > 30 ? '...' : '');
+      setSessions(prev => {
+        const updated = prev.map(s => {
+          if (s.id === sessionId) {
+            const updatedTitles = { ...(s.titles || {}), [agentKey]: title };
+            return { ...s, title, titles: updatedTitles, updatedAt: Date.now() };
+          }
+          return s;
+        });
+        localStorage.setItem('chat_sessions', JSON.stringify(updated));
+        return updated;
+      });
+    }
+  }, [messages, sessionId, agentKey]);
 
-  const handleSwitchAgent = (newAgent: AgentType) => {
-    if (newAgent === activeAgent) {
+  const handleSwitchAgentKey = (newKey: AgentKey) => {
+    if (newKey === agentKey) {
       setIsAgentMenuOpen(false);
       return;
     }
-    // Show welcome message immediately; the history useEffect will fetch from Cosmos DB
-    const newConfig = AGENT_CONFIGS[newAgent];
-    setMessages([{ id: '1', text: newConfig.welcomeMessage, sender: 'assistant' }]);
-    setActiveAgent(newAgent);
-    localStorage.setItem('active_agent_type', newAgent);
+    localStorage.setItem(`chat_history_${sessionId}_${agentKey}`, JSON.stringify(messages));
+
+    setAgentKey(newKey);
+    localStorage.setItem('active_agent_key', newKey);
     setIsAgentMenuOpen(false);
+
+    try {
+      const storedSessions = JSON.parse(localStorage.getItem('chat_sessions') || '[]');
+      setSessions(storedSessions);
+    } catch (e) {}
+
+    const { agent: newAgent } = parseAgentKey(newKey);
+    const newConfig = AGENT_CONFIGS[newAgent];
+    const savedNew = localStorage.getItem(`chat_history_${sessionId}_${newKey}`);
+    setMessages(savedNew ? JSON.parse(savedNew) : [{ id: '1', text: newConfig.welcomeMessage, sender: 'assistant' }]);
   };
 
   const sendMessage = async (textToSend: string) => {
@@ -1342,7 +1365,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                       transition: 'all 0.15s ease',
                     }}
                   >
-                    <span>{currentConfig.name}</span>
+                    <span>{AGENT_KEY_LABELS[agentKey]}</span>
                     <ChevronDown size={14} style={{ transform: isAgentMenuOpen ? 'rotate(180deg)' : 'none', transition: 'transform 0.2s' }} />
                   </button>
 
@@ -1365,50 +1388,33 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                         minWidth: '280px',
                         boxShadow: '0 10px 25px rgba(0,0,0,0.6)'
                       }}>
-                        <div
-                          onClick={() => handleSwitchAgent('contracts')}
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '10px',
-                            padding: '8px 10px',
-                            borderRadius: '6px',
-                            cursor: 'pointer',
-                            background: activeAgent === 'contracts' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
-                            color: activeAgent === 'contracts' ? '#38bdf8' : '#cbd5e1',
-                            fontSize: '0.84rem',
-                            fontWeight: activeAgent === 'contracts' ? 600 : 400
-                          }}
-                        >
-                          <FileText size={16} color={activeAgent === 'contracts' ? '#38bdf8' : '#94a3b8'} />
-                          <div>
-                            <div>Contracts & Sales Intelligence</div>
-                            <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Client contracts, sales, rates & clauses</div>
-                          </div>
-                        </div>
-
-                        <div
-                          onClick={() => handleSwitchAgent('aviation')}
-                          style={{
-                            display: 'flex',
-                            alignItems: 'center',
-                            gap: '10px',
-                            padding: '8px 10px',
-                            borderRadius: '6px',
-                            cursor: 'pointer',
-                            background: activeAgent === 'aviation' ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
-                            color: activeAgent === 'aviation' ? '#38bdf8' : '#cbd5e1',
-                            fontSize: '0.84rem',
-                            fontWeight: activeAgent === 'aviation' ? 600 : 400,
-                            marginTop: '2px'
-                          }}
-                        >
-                          <PlaneTakeoff size={16} color={activeAgent === 'aviation' ? '#38bdf8' : '#94a3b8'} />
-                          <div>
-                            <div>Aviation Operations & Uplift</div>
-                            <div style={{ fontSize: '0.72rem', color: '#64748b' }}>Fuel uplifts (Litres), flights, stands & fleet</div>
-                          </div>
-                        </div>
+                        {(['contracts-fast', 'contracts-reasoning', 'aviation-fast', 'aviation-reasoning'] as AgentKey[]).map((key) => {
+                          const { agent, mode } = parseAgentKey(key);
+                          const isActive = key === agentKey;
+                          const Icon = agent === 'aviation' ? PlaneTakeoff : FileText;
+                          return (
+                            <div
+                              key={key}
+                              onClick={() => handleSwitchAgentKey(key)}
+                              style={{
+                                display: 'flex', alignItems: 'center', gap: '10px',
+                                padding: '8px 10px', borderRadius: '6px', cursor: 'pointer',
+                                background: isActive ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+                                color: isActive ? '#38bdf8' : '#cbd5e1',
+                                fontSize: '0.84rem', fontWeight: isActive ? 600 : 400,
+                                marginTop: '2px',
+                              }}
+                            >
+                              <Icon size={16} color={isActive ? '#38bdf8' : '#94a3b8'} />
+                              <div>
+                                <div>{AGENT_KEY_LABELS[key]}</div>
+                                <div style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                                  {mode === 'reasoning' ? 'Full step-by-step thought process' : 'Quicker, tool-verified answers'}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </>
                   )}
@@ -1417,34 +1423,6 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
               </div>
             </div>
             <div className="header-right">
-              <button
-                onClick={() => setReasoningMode(m => !m)}
-                title={reasoningMode ? 'Reasoning mode: shows full step-by-step thought process (slower)' : 'Fast mode: tool-verified answers without narrated reasoning (quicker)'}
-                style={{
-                  display: 'flex', alignItems: 'center', gap: '8px',
-                  background: 'rgba(255,255,255,0.04)',
-                  border: '1px solid var(--border)',
-                  borderRadius: '999px',
-                  padding: '4px 6px 4px 12px',
-                  cursor: 'pointer',
-                }}
-              >
-                <span style={{ fontSize: '0.72rem', fontWeight: 600, color: reasoningMode ? '#f1f5f9' : '#94a3b8' }}>
-                  {reasoningMode ? 'Reasoning' : 'Fast'}
-                </span>
-                <span style={{
-                  position: 'relative', width: '32px', height: '18px', borderRadius: '999px',
-                  background: reasoningMode ? 'var(--primary)' : 'rgba(255,255,255,0.15)',
-                  transition: 'background 0.2s',
-                }}>
-                  <span style={{
-                    position: 'absolute', top: '2px',
-                    left: reasoningMode ? '16px' : '2px',
-                    width: '14px', height: '14px', borderRadius: '50%',
-                    background: '#fff', transition: 'left 0.2s',
-                  }} />
-                </span>
-              </button>
               <span className="badge">{currentConfig.badge}</span>
               <button className="btn-icon" onClick={onNewChat} title="New Chat"><Plus size={18} /></button>
               <button className="btn-icon" onClick={handleLogoutClick} title="Logout"><LogOut size={18} /></button>
