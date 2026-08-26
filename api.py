@@ -19,6 +19,9 @@ from aviation_agent import build_aviation_reasoning_agent, build_aviation_fast_a
 from agent_framework._harness._todo import TodoSessionStore
 import cosmos_db
 from scope_gate import check_gate
+from session_store import sessions, SESSION_TIMEOUT, make_session_entry
+from auth_azure import router as auth_router
+
 
 contracts_reasoning_agent = None
 contracts_fast_agent = None
@@ -70,43 +73,36 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
-# Allow CORS for frontend
+# Mount SSO authentication router
+app.include_router(auth_router)
+
+# Allow CORS for the frontend
+# NOTE: allow_origins must list exact origins (not "*") when allow_credentials=True
+# so that the browser will send the session cookie cross-origin.
+_FRONTEND_ORIGIN = os.environ.get("FRONTEND_URL", "http://localhost:5173")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[_FRONTEND_ORIGIN],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# In-memory session store: caches agent session objects per session_id
-# (Cosmos DB handles the persistent message history; this is just for the live LLM context)
-sessions = {}
-SESSION_TIMEOUT = 30 * 60  # 30 minutes
-
-
-class LoginRequest(BaseModel):
-    username: str
-    password: str
+# In-memory session store lives in session_store.py (shared with auth_azure.py)
+# sessions = {}  ← imported from session_store
 
 
 class ChatRequest(BaseModel):
     message: str
     session_id: str
     agent_type: str = "contracts"  # "contracts" or "aviation"
-
-
-@app.post("/login")
-async def login(req: LoginRequest):
-    """Validate credentials. Does NOT create a new session — the frontend decides
-    whether to resume an existing session or create a fresh one."""
-    if req.username and req.password:
-        return {"username": req.username, "message": "ok"}
-    raise HTTPException(status_code=401, detail="Invalid credentials")
+    agent_key: str | None = None   # "contracts-fast" | "contracts-reasoning" | "aviation-fast" | "aviation-reasoning"
 
 
 @app.post("/logout")
 async def logout(req: Request):
+    """Legacy logout — clears the in-memory session.
+    For SSO sessions, the frontend should call POST /api/v1/auth/logout instead."""
     auth_header = req.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         session_id = auth_header.split(" ")[1]
@@ -117,14 +113,15 @@ async def logout(req: Request):
 
 
 @app.get("/sessions")
-async def get_sessions(username: str):
-    """Return all past sessions for this user from Cosmos DB."""
-    return await cosmos_db.get_user_sessions(user_id=username)
+async def get_sessions(username: str, agent_key: str = None):
+    """Return past sessions for this user from Cosmos DB, optionally filtered by agent_key."""
+    return await cosmos_db.get_user_sessions(user_id=username, agent_key=agent_key)
 
 
 class NewSessionRequest(BaseModel):
     username: str
     title: str = "New Chat"
+    agent_key: str = "contracts-fast"
 
 
 @app.post("/sessions")
@@ -132,10 +129,12 @@ async def create_new_session(req: NewSessionRequest):
     """Create a new chat session in Cosmos DB and register it in memory."""
     session_id = await cosmos_db.create_session(
         user_id=req.username,
-        title=req.title
+        title=req.title,
+        agent_key=req.agent_key
     )
     sessions[session_id] = {
         "username": req.username,
+        "agent_key": req.agent_key,
         "obj_contracts_reasoning": None,
         "obj_contracts_fast": None,
         "obj_aviation_reasoning": None,
@@ -145,10 +144,28 @@ async def create_new_session(req: NewSessionRequest):
     return {"session_id": session_id}
 
 
+class UpdateSessionAgentRequest(BaseModel):
+    username: str
+    agent_key: str
+
+
+@app.patch("/sessions/{session_id}/agent")
+async def update_session_agent(session_id: str, req: UpdateSessionAgentRequest):
+    """Point an unused New Chat at a different agent without creating another tab."""
+    await cosmos_db.update_session_agent(session_id, req.username, req.agent_key)
+    if session_id in sessions:
+        sessions[session_id]["agent_key"] = req.agent_key
+    return {"status": "ok"}
+
+
 @app.get("/sessions/{session_id}/history")
-async def get_session_history(session_id: str):
-    """Return all messages for a given session from Cosmos DB."""
-    return await cosmos_db.get_session_messages(session_id=session_id)
+async def get_session_history(session_id: str, username: str = None, agent_key: str = None):
+    """Return all messages for a given session from Cosmos DB, verifying ownership."""
+    return await cosmos_db.get_session_messages(
+        session_id=session_id,
+        user_id=username,
+        agent_key=agent_key
+    )
 
 
 class RegisterSessionRequest(BaseModel):
@@ -213,7 +230,7 @@ def _get_session_obj(session_data: dict, agent, obj_key: str):
     return session_data[obj_key]
 
 
-async def _stream_chat(agent, session_obj, session_id: str, message: str, is_harness: bool, agent_type: str = "contracts"):
+async def _stream_chat(agent, session_obj, session_id: str, message: str, is_harness: bool, agent_type: str = "contracts", agent_key: str = None):
     """Shared SSE generator. Saves user + assistant messages to Cosmos DB around the stream."""
     if agent_type == "aviation":
         set_current_database(os.environ.get("FABRIC_AVIATION_DATABASE", "aviation-warehouse"))
@@ -228,17 +245,22 @@ async def _stream_chat(agent, session_obj, session_id: str, message: str, is_har
         yield "data: [DONE]\n\n"
         return
 
-    # Persist user message to Cosmos DB before streaming the response
+    username = sessions.get(session_id, {}).get("username", "unknown")
+    mode_suffix = "reasoning" if is_harness else "fast"
+    agent_key = agent_key or sessions.get(session_id, {}).get("agent_key") or f"{agent_type}-{mode_suffix}"
+
+    # Persist user message to Cosmos DB before streaming the response, storing all strict tracking info
     await cosmos_db.save_message(
         session_id=session_id,
         role="user",
         content=message,
+        user_id=username,
+        agent_key=agent_key,
         agent_type=agent_type
     )
 
     # Update the session title in Cosmos DB from the user's message text.
     # This ensures the sidebar shows a meaningful title on next login instead of "New Chat".
-    username = sessions.get(session_id, {}).get("username", "")
     if username and username != "unknown":
         title = message[:30] + ("..." if len(message) > 30 else "")
         try:
@@ -320,6 +342,8 @@ async def _stream_chat(agent, session_obj, session_id: str, message: str, is_har
             session_id=session_id,
             role="assistant",
             content=full_text,
+            user_id=username,
+            agent_key=agent_key,
             agent_type=agent_type,
             tool_calls=tool_calls_seen if tool_calls_seen else None,
             mode="reasoning" if is_harness else "fast"
@@ -339,7 +363,7 @@ def _chat_response(agent, obj_key: str, is_harness: bool, req: ChatRequest):
 
     session_obj = _get_session_obj(session_data, agent, obj_key)
     return StreamingResponse(
-        _stream_chat(agent, session_obj, req.session_id, req.message, is_harness, req.agent_type),
+        _stream_chat(agent, session_obj, req.session_id, req.message, is_harness, req.agent_type, req.agent_key),
         media_type="text/event-stream",
     )
 

@@ -5,7 +5,7 @@ interface ChatProps {
   sessionId: string;
   onLogout: () => void;
   onActivity: () => void;
-  onNewChat: () => void;
+  onNewChat: (newSessionId: string) => void;  // Chat.tsx owns session creation; passes ID up
   onSwitchSession: (id: string) => void;
 }
 
@@ -29,7 +29,9 @@ interface Message {
 interface SessionMeta {
   id: string;
   title: string;
-  titles?: Partial<Record<AgentKey, string>>;   // was: { contracts?: string; aviation?: string }
+  agent_key?: AgentKey;
+  agent_name?: string;
+  titles?: Partial<Record<AgentKey, string>>;
   updatedAt: number;
 }
 
@@ -802,6 +804,23 @@ function parseAgentKey(key: AgentKey): { agent: AgentType; mode: AgentMode } {
   return { agent, mode };
 }
 
+function isEmptyChatTitle(title?: string): boolean {
+  return !title || title === 'New Chat';
+}
+
+function moveSessionToFront(list: SessionMeta[], id: string): SessionMeta[] {
+  const idx = list.findIndex(s => s.id === id);
+  if (idx <= 0) return list;
+  const next = [...list];
+  const [item] = next.splice(idx, 1);
+  next.unshift(item);
+  return next;
+}
+
+function rememberAgentSession(agentKey: AgentKey, sessionId: string) {
+  localStorage.setItem(`last_session_${agentKey}`, sessionId);
+}
+
 interface AgentConfig {
   id: AgentType;
   name: string;
@@ -872,6 +891,22 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
   const [messages, setMessages] = useState<Message[]>([{ id: '1', text: currentConfig.welcomeMessage, sender: 'assistant' }]);
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [input, setInput] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
+
+  const createSessionOnServer = async (key: AgentKey = agentKey): Promise<string | null> => {
+    const username = localStorage.getItem('chat_username') || 'user';
+    const res = await fetch('http://localhost:8000/sessions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ username, title: 'New Chat', agent_key: key }),
+    });
+    const data = await res.json();
+    return data.session_id || null;
+  };
 
   const handleDeleteSession = async (e: React.MouseEvent, targetSessionId: string) => {
     e.stopPropagation();
@@ -882,30 +917,41 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
         `http://localhost:8000/sessions/${targetSessionId}?username=${encodeURIComponent(username)}`,
         { method: 'DELETE' }
       );
-      // Remove from sidebar state
-      setSessions(prev => prev.filter(s => s.id !== targetSessionId));
-      // If the deleted session is the active one, open a new chat
+      const remaining = sessions.filter(s => s.id !== targetSessionId);
+      setSessions(remaining);
       if (targetSessionId === sessionId) {
-        onNewChat();
+        if (remaining.length > 0) {
+          onSwitchSession(remaining[0].id);
+        } else {
+          const newId = await createSessionOnServer();
+          if (newId) {
+            setSessions([{ id: newId, title: 'New Chat', agent_key: agentKey, agent_name: AGENT_KEY_LABELS[agentKey], updatedAt: Date.now() }]);
+            onNewChat(newId);
+          }
+        }
       }
     } catch (err) {
       console.error('Failed to delete session', err);
     }
   };
 
-  // Load the user's past sessions from Cosmos DB on mount,
-  // then back-fill any "New Chat" titles from their first user message.
+  // Load every chat tab for this user (all agents). Do not filter by agent.
   useEffect(() => {
     const username = localStorage.getItem('chat_username');
     if (!username) return;
-    fetch(`http://localhost:8000/sessions?username=${encodeURIComponent(username)}`)
-      .then(r => r.json())
-      .then(async (data: any[]) => {
-        if (!Array.isArray(data)) return;
-        // For sessions that still say "New Chat", fetch their first user message to get the real title
-        const enriched = await Promise.all(
-          data.map(async (s) => {
-            if (s.title && s.title !== 'New Chat') return s;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const res = await fetch(
+          `http://localhost:8000/sessions?username=${encodeURIComponent(username)}`
+        );
+        const data = await res.json();
+        if (cancelled || !Array.isArray(data)) return;
+
+        const enriched: SessionMeta[] = await Promise.all(
+          data.map(async (s: any) => {
+            if (!isEmptyChatTitle(s.title)) return s;
             try {
               const hRes = await fetch(`http://localhost:8000/sessions/${s.id}/history`);
               const msgs: any[] = await hRes.json();
@@ -917,45 +963,63 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
             return s;
           })
         );
-        setSessions(enriched);
-      })
-      .catch(console.error);
+        if (cancelled) return;
+
+        setSessions(prev => {
+          const optimisticTitles: Record<string, string> = {};
+          prev.forEach(s => { if (!isEmptyChatTitle(s.title)) optimisticTitles[s.id] = s.title; });
+          const merged = enriched.map(s =>
+            optimisticTitles[s.id] ? { ...s, title: optimisticTitles[s.id] } : s
+          );
+          const extras = prev.filter(s => !merged.some(m => m.id === s.id));
+          const combined = [...extras, ...merged];
+          return moveSessionToFront(combined, sessionIdRef.current || sessionId);
+        });
+      } catch (e) {
+        if (!cancelled) console.error(e);
+      }
+    })();
+
+    return () => { cancelled = true; };
   }, []);
 
-  // Load message history for the current session + agent from Cosmos DB
+  // Load the full transcript for whatever tab is selected (any agent).
   useEffect(() => {
+    let cancelled = false;
+    setIsLoading(false);
+    setInput('');
+    setOpenMenuId(null);
+
+    const welcome = currentConfig.welcomeMessage;
+    setMessages([{ id: '1', text: welcome, sender: 'assistant' }]);
+
     fetch(`http://localhost:8000/sessions/${sessionId}/history`)
       .then(r => r.json())
       .then((data: any[]) => {
+        if (cancelled) return;
         if (!Array.isArray(data) || data.length === 0) {
-          setMessages([{ id: '1', text: currentConfig.welcomeMessage, sender: 'assistant' }]);
+          setMessages([{ id: '1', text: welcome, sender: 'assistant' }]);
           return;
         }
-        // Filter to only messages for the active agent
-        const filtered = data.filter(m => m.agent_type === activeAgent);
-        if (filtered.length === 0) {
-          setMessages([{ id: '1', text: currentConfig.welcomeMessage, sender: 'assistant' }]);
-        } else {
-          setMessages(filtered.map(m => ({
-            id: m.id,
-            text: m.content,
-            sender: m.role as 'user' | 'assistant',
-            toolCalls: m.toolCalls,
-            mode: m.mode,
-          })));
-          // Immediately update this session's sidebar title from its first user message,
-          // so the title shows correctly without waiting for Cosmos DB to be queried again.
-          const firstUser = data.find(m => m.role === 'user');
-          if (firstUser) {
-            const title = firstUser.content.slice(0, 30) + (firstUser.content.length > 30 ? '...' : '');
-            setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title } : s));
-          }
+        const firstUser = data.find(m => m.role === 'user');
+        if (!firstUser) {
+          setMessages([{ id: '1', text: welcome, sender: 'assistant' }]);
+          return;
         }
+        setMessages(data.map(m => ({
+          id: m.id,
+          text: m.content,
+          sender: m.role as 'user' | 'assistant',
+          toolCalls: m.toolCalls,
+          mode: m.mode,
+        })));
+        const title = firstUser.content.slice(0, 30) + (firstUser.content.length > 30 ? '...' : '');
+        setSessions(prev => prev.map(s => s.id === sessionId ? { ...s, title } : s));
       })
       .catch(console.error);
-  }, [sessionId, activeAgent, currentConfig.welcomeMessage]);
-  const [input, setInput] = useState('');
-  const [isLoading, setIsLoading] = useState(false);
+
+    return () => { cancelled = true; };
+  }, [sessionId]);
   const [isSidebarVisible, setIsSidebarVisible] = useState<boolean>(() => {
     const saved = localStorage.getItem('sidebar_visible');
     return saved === null ? true : saved === 'true';
@@ -980,8 +1044,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
   }, [messages]);
 
   const getSessionDisplayTitle = (s: SessionMeta, _agent: AgentType): string => {
-    // Use the title stored in Cosmos DB; fall back to first user message in current session
-    if (s.title && s.title !== 'New Chat') return s.title;
+    if (!isEmptyChatTitle(s.title)) return s.title;
     if (s.id === sessionId) {
       const firstUser = messages.find(m => m.sender === 'user');
       if (firstUser && firstUser.text) {
@@ -993,43 +1056,48 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
 
   useEffect(() => {
     localStorage.setItem(`chat_history_${sessionId}_${agentKey}`, JSON.stringify(messages));
-    const firstUserMsg = messages.find(m => m.sender === 'user');
-    if (firstUserMsg && firstUserMsg.text) {
-      const title = firstUserMsg.text.slice(0, 30) + (firstUserMsg.text.length > 30 ? '...' : '');
-      setSessions(prev => {
-        const updated = prev.map(s => {
-          if (s.id === sessionId) {
-            const updatedTitles = { ...(s.titles || {}), [agentKey]: title };
-            return { ...s, title, titles: updatedTitles, updatedAt: Date.now() };
-          }
-          return s;
-        });
-        localStorage.setItem('chat_sessions', JSON.stringify(updated));
-        return updated;
-      });
-    }
   }, [messages, sessionId, agentKey]);
 
-  const handleSwitchAgentKey = (newKey: AgentKey) => {
+  const handleSwitchAgentKey = async (newKey: AgentKey) => {
     if (newKey === agentKey) {
       setIsAgentMenuOpen(false);
       return;
     }
-    localStorage.setItem(`chat_history_${sessionId}_${agentKey}`, JSON.stringify(messages));
+    const { agent: newAgent } = parseAgentKey(newKey);
+    const currentMeta = sessions.find(s => s.id === sessionId);
+    const alreadyNewChat = !messages.some(m => m.sender === 'user') && isEmptyChatTitle(currentMeta?.title);
 
     setAgentKey(newKey);
     localStorage.setItem('active_agent_key', newKey);
     setIsAgentMenuOpen(false);
+    setMessages([{ id: '1', text: AGENT_CONFIGS[newAgent].welcomeMessage, sender: 'assistant' }]);
+
+    if (alreadyNewChat) {
+      setSessions(prev => prev.map(s =>
+        s.id === sessionId
+          ? { ...s, agent_key: newKey, agent_name: AGENT_KEY_LABELS[newKey], updatedAt: Date.now() }
+          : s
+      ));
+      const username = localStorage.getItem('chat_username') || 'user';
+      fetch(`http://localhost:8000/sessions/${sessionId}/agent`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, agent_key: newKey }),
+      }).catch(console.error);
+      return;
+    }
 
     try {
-      const storedSessions = JSON.parse(localStorage.getItem('chat_sessions') || '[]');
-      setSessions(storedSessions);
-    } catch (e) {}
-
-    const { agent: newAgent } = parseAgentKey(newKey);
-    const newConfig = AGENT_CONFIGS[newAgent];
-    const savedNew = localStorage.getItem(`chat_history_${sessionId}_${newKey}`);
-    setMessages(savedNew ? JSON.parse(savedNew) : [{ id: '1', text: newConfig.welcomeMessage, sender: 'assistant' }]);
+      const newId = await createSessionOnServer(newKey);
+      if (!newId) return;
+      setSessions(prev => [
+        { id: newId, title: 'New Chat', agent_key: newKey, agent_name: AGENT_KEY_LABELS[newKey], updatedAt: Date.now() },
+        ...prev,
+      ]);
+      onNewChat(newId);
+    } catch (e) {
+      console.error('Failed to open a new chat for this agent', e);
+    }
   };
 
   const sendMessage = async (textToSend: string) => {
@@ -1047,6 +1115,30 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     setInput('');
     setIsLoading(true);
 
+    // Optimistically update the sidebar title on the FIRST user message.
+    // This fires immediately — before the LLM responds — so the sidebar
+    // never stays as "New Chat" after the user types something.
+    // Works even if the Cosmos DB sessions fetch is still in-flight (sessions=[]):
+    // in that case the session is added optimistically and will be de-duped
+    // when the fetch completes.
+    const isFirstUserMessage = !messages.some(m => m.sender === 'user');
+    if (isFirstUserMessage) {
+      const sidebarTitle = textToSend.slice(0, 30) + (textToSend.length > 30 ? '...' : '');
+      setSessions(prev => {
+        const alreadyInList = prev.some(s => s.id === sessionId);
+        if (alreadyInList) {
+          // Update in place
+          return moveSessionToFront(
+            prev.map(s => s.id === sessionId ? { ...s, title: sidebarTitle, updatedAt: Date.now() } : s),
+            sessionId
+          );
+        }
+        // Session not yet in list (fetch still in progress) — add it optimistically at top
+        return [{ id: sessionId, title: sidebarTitle, updatedAt: Date.now() } as SessionMeta, ...prev];
+      });
+    }
+
+
     // Capture the toggle position at send time
     const modeAtSend: 'reasoning' | 'fast' = reasoningMode ? 'reasoning' : 'fast';
     const endpoint = reasoningMode
@@ -1057,7 +1149,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
       const res = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userMessage.text, session_id: sessionId, agent_type: activeAgent })
+        body: JSON.stringify({ message: userMessage.text, session_id: sessionId, agent_type: activeAgent, agent_key: agentKey })
       });
 
       if (res.status === 401) {
@@ -1145,11 +1237,27 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     sendMessage(input);
   };
 
+  const handleNewChatClick = async () => {
+    try {
+      const newId = await createSessionOnServer();
+      if (newId) {
+        setSessions(prev => [
+          { id: newId, title: 'New Chat', agent_key: agentKey, agent_name: AGENT_KEY_LABELS[agentKey], updatedAt: Date.now() },
+          ...prev.filter(s => s.id !== newId),
+        ]);
+        onNewChat(newId);
+      }
+    } catch (e) {
+      console.error('Failed to start new chat', e);
+    }
+  };
+
   const handleLogoutClick = async () => {
     try {
-      await fetch('http://localhost:8000/logout', {
+      // Use SSO logout to clear the session cookie
+      await fetch('http://localhost:8000/api/v1/auth/logout', {
         method: 'POST',
-        headers: { 'Authorization': `Bearer ${sessionId}` }
+        credentials: 'include',
       });
     } catch (e) {
       // Ignore errors on logout
@@ -1224,18 +1332,18 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
           </div>
 
           {(() => {
-              // Always show current session at top; merge with past sessions from Cosmos DB
-              const currentSessionInList = sessions.find(s => s.id === sessionId);
-              const allSessions = currentSessionInList
-                ? sessions
-                : [{ id: sessionId, title: 'New Chat', updatedAt: Date.now() } as SessionMeta, ...sessions];
               return (
                 <div className="history-section">
                   <h3 className="sidebar-title">RECENT CHATS</h3>
                   <div className="history-list">
-                    {allSessions.map(s => {
+                    {sessions.length === 0 ? (
+                      <div style={{ color: '#475569', fontSize: '0.78rem', padding: '6px 4px' }}>
+                        No chats yet.
+                      </div>
+                    ) : sessions.map(s => {
                       const displayTitle = getSessionDisplayTitle(s, activeAgent);
                       const isMenuOpen = openMenuId === s.id;
+                      const tabAgent = s.agent_name || (s.agent_key ? AGENT_KEY_LABELS[s.agent_key] : '');
                       return (
                         <div
                           key={s.id}
@@ -1245,13 +1353,26 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                         >
                           <button
                             className={`history-button ${s.id === sessionId ? 'active' : ''}`}
-                            style={{ flex: 1, paddingRight: '32px', minWidth: 0 }}
-                            onClick={() => onSwitchSession(s.id)}
+                            style={{ flex: 1, paddingRight: '32px', minWidth: 0, flexDirection: 'column', alignItems: 'flex-start', gap: '2px' }}
+                            onClick={() => {
+                              if (s.agent_key && s.agent_key !== agentKey) {
+                                setAgentKey(s.agent_key);
+                                localStorage.setItem('active_agent_key', s.agent_key);
+                              }
+                              onSwitchSession(s.id);
+                            }}
                           >
-                            <MessageSquare size={16} style={{ flexShrink: 0 }} />
-                            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                              {displayTitle}
+                            <span style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', width: '100%' }}>
+                              <MessageSquare size={16} style={{ flexShrink: 0 }} />
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                {displayTitle}
+                              </span>
                             </span>
+                            {tabAgent && (
+                              <span style={{ fontSize: '0.68rem', color: '#64748b', paddingLeft: '28px' }}>
+                                {tabAgent}
+                              </span>
+                            )}
                           </button>
 
                           {/* 3-dot menu trigger */}
@@ -1308,7 +1429,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
           <h3 className="sidebar-title" style={{ marginTop: sessions.length > 0 ? '2.5rem' : '0' }}>TRY ASKING</h3>
           <div className="faq-list">
             {currentConfig.faqs.map((faq, i) => (
-              <button key={i} className="faq-button" onClick={() => sendMessage(faq)}>
+              <button key={i} className="faq-button" onClick={() => sendMessage(faq)} disabled={isLoading}>
                 {faq}
               </button>
             ))}
@@ -1424,7 +1545,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
             </div>
             <div className="header-right">
               <span className="badge">{currentConfig.badge}</span>
-              <button className="btn-icon" onClick={onNewChat} title="New Chat"><Plus size={18} /></button>
+              <button className="btn-icon" onClick={handleNewChatClick} title="New Chat"><Plus size={18} /></button>
               <button className="btn-icon" onClick={handleLogoutClick} title="Logout"><LogOut size={18} /></button>
             </div>
           </header>
@@ -1446,7 +1567,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                       isStreaming={isLoading && msg.id === messages[messages.length - 1].id}
                       todos={msg.todos}
                       toolCalls={msg.toolCalls}
-                      mode={msg.mode}
+                      mode={msg.mode || agentMode}
                     />
                   ) : (
                     <span style={{ whiteSpace: 'pre-wrap' }}>{msg.text}</span>

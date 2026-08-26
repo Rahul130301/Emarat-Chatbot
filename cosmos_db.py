@@ -54,7 +54,15 @@ async def close_cosmos():
         await _client.close()
 
 
-async def create_session(user_id: str, title: str = "New Chat") -> str:
+AGENT_KEY_NAMES = {
+    "contracts-fast": "Contracts Agent — Fast",
+    "contracts-reasoning": "Contracts Agent — Reasoning",
+    "aviation-fast": "Aviation Agent — Fast",
+    "aviation-reasoning": "Aviation Agent — Reasoning",
+}
+
+
+async def create_session(user_id: str, title: str = "New Chat", agent_key: str = "contracts-fast") -> str:
     """Create a new chat session in Cosmos DB. Returns the session_id."""
     if not _sessions_container:
         # Cosmos DB not available — fall back to a plain UUID
@@ -65,19 +73,31 @@ async def create_session(user_id: str, title: str = "New Chat") -> str:
         "id": session_id,
         "user_id": user_id,
         "title": title,
+        "agent_key": agent_key,
+        "agent_name": AGENT_KEY_NAMES.get(agent_key, agent_key),
         "updatedAt": int(time.time() * 1000)
     }
     await _sessions_container.create_item(body=session_item)
     return session_id
 
 
-async def get_user_sessions(user_id: str) -> list:
-    """Return all sessions for a specific user, newest first."""
+async def get_user_sessions(user_id: str, agent_key: str = None) -> list:
+    """Return sessions for a user, newest first. Optionally filter by agent_key."""
     if not _sessions_container:
         return []
 
-    query = "SELECT * FROM c WHERE c.user_id = @user_id ORDER BY c.updatedAt DESC"
-    parameters = [{"name": "@user_id", "value": user_id}]
+    if agent_key:
+        query = (
+            "SELECT * FROM c WHERE c.user_id = @user_id "
+            "AND c.agent_key = @agent_key ORDER BY c.updatedAt DESC"
+        )
+        parameters = [
+            {"name": "@user_id",   "value": user_id},
+            {"name": "@agent_key", "value": agent_key},
+        ]
+    else:
+        query = "SELECT * FROM c WHERE c.user_id = @user_id ORDER BY c.updatedAt DESC"
+        parameters = [{"name": "@user_id", "value": user_id}]
 
     items = _sessions_container.query_items(
         query=query,
@@ -100,15 +120,32 @@ async def update_session_title(session_id: str, user_id: str, title: str):
         pass
 
 
+async def update_session_agent(session_id: str, user_id: str, agent_key: str):
+    """Retarget an unused (empty) session to a different agent."""
+    if not _sessions_container:
+        return
+
+    try:
+        item = await _sessions_container.read_item(item=session_id, partition_key=user_id)
+        item["agent_key"] = agent_key
+        item["agent_name"] = AGENT_KEY_NAMES.get(agent_key, agent_key)
+        item["updatedAt"] = int(time.time() * 1000)
+        await _sessions_container.replace_item(item=session_id, body=item)
+    except exceptions.CosmosResourceNotFoundError:
+        pass
+
+
 async def save_message(
     session_id: str,
     role: str,
     content: str,
+    user_id: str = None,
+    agent_key: str = None,
     agent_type: str = "contracts",
     tool_calls: list = None,
     mode: str = None
 ) -> str:
-    """Save a chat message (user or assistant) to the messages container."""
+    """Save a chat message to the messages container with full isolation tags."""
     if not _messages_container:
         return str(uuid.uuid4())
 
@@ -122,6 +159,10 @@ async def save_message(
         "timestamp": int(time.time() * 1000)
     }
 
+    if user_id:
+        message_item["user_id"] = user_id
+    if agent_key:
+        message_item["agent_key"] = agent_key
     if tool_calls:
         message_item["toolCalls"] = tool_calls
     if mode:
@@ -131,13 +172,24 @@ async def save_message(
     return message_id
 
 
-async def get_session_messages(session_id: str) -> list:
-    """Return all messages for a session, in chronological order."""
+async def get_session_messages(session_id: str, user_id: str = None, agent_key: str = None) -> list:
+    """Return all messages for a session, securely checking ownership if provided."""
     if not _messages_container:
         return []
 
-    query = "SELECT * FROM c WHERE c.session_id = @session_id ORDER BY c.timestamp ASC"
+    # Build query securely checking all required bounds
+    query = "SELECT * FROM c WHERE c.session_id = @session_id"
     parameters = [{"name": "@session_id", "value": session_id}]
+
+    if user_id:
+        query += " AND c.user_id = @user_id"
+        parameters.append({"name": "@user_id", "value": user_id})
+        
+    if agent_key:
+        query += " AND (NOT IS_DEFINED(c.agent_key) OR c.agent_key = @agent_key)"
+        parameters.append({"name": "@agent_key", "value": agent_key})
+
+    query += " ORDER BY c.timestamp ASC"
 
     items = _messages_container.query_items(
         query=query,
@@ -165,4 +217,3 @@ async def delete_session(session_id: str, user_id: str):
             await _sessions_container.delete_item(item=session_id, partition_key=user_id)
         except Exception as e:
             print(f"Warning: Could not delete session {session_id}: {e}")
-

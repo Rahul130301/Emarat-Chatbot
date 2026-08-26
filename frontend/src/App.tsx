@@ -6,60 +6,60 @@ const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true); // prevent login flash on load
 
+  // ── On every page load / refresh: check if the user is already authenticated ──
   useEffect(() => {
-    // Check for existing session in localStorage
-    const storedSession = localStorage.getItem('chat_session_id');
-    const storedActivity = localStorage.getItem('chat_last_activity');
-    const storedUsername = localStorage.getItem('chat_username');
+    const checkAuth = async () => {
+      try {
+        const res = await fetch('http://localhost:8000/api/v1/auth/me', {
+          credentials: 'include', // send the HTTP-only session cookie
+        });
 
-    // If username is missing (session created before username tracking was added),
-    // clear the session so the user logs in fresh and username gets properly stored.
-    if (storedSession && !storedUsername) {
-      handleLogout();
-      return;
-    }
-
-    if (storedSession && storedActivity) {
-      const timeSinceActivity = Date.now() - parseInt(storedActivity, 10);
-      if (timeSinceActivity < SESSION_TIMEOUT_MS) {
-        setSessionId(storedSession);
-      } else {
-        handleLogout();
+        if (res.ok) {
+          const data = await res.json();
+          // User has a valid session cookie → restore session
+          handleLogin(data.session_id, data.username, data.display_name);
+        }
+        // 401 = not logged in → show login page (do nothing)
+      } catch (err) {
+        console.error('Auth check failed:', err);
+      } finally {
+        // Remove ?sso=ok from URL without triggering a reload
+        if (window.location.search.includes('sso=ok')) {
+          window.history.replaceState({}, '', window.location.pathname);
+        }
+        setIsCheckingAuth(false);
       }
-    }
+    };
+
+    checkAuth();
   }, []);
 
+  // ── Session timeout auto-logout ───────────────────────────────────────────
   useEffect(() => {
-    // Auto logout interval check
     if (!sessionId) return;
 
     const interval = setInterval(() => {
       const storedActivity = localStorage.getItem('chat_last_activity');
       if (storedActivity && Date.now() - parseInt(storedActivity, 10) > SESSION_TIMEOUT_MS) {
         handleLogout();
-        alert('Session expired due to inactivity. Please login again.');
+        alert('Session expired due to inactivity. Please sign in again.');
       }
     }, 60000); // Check every minute
 
     return () => clearInterval(interval);
   }, [sessionId]);
 
-  const updateActivity = () => {
-    localStorage.setItem('chat_last_activity', Date.now().toString());
-  };
-
+  // ── Global activity tracking (keep session alive) ─────────────────────────
   useEffect(() => {
-    // Global activity tracker to keep session alive during reading/mouse movement
     if (!sessionId) return;
 
     let throttleTimeout: NodeJS.Timeout | null = null;
     const handleGlobalActivity = () => {
       if (!throttleTimeout) {
-        updateActivity();
-        throttleTimeout = setTimeout(() => {
-          throttleTimeout = null;
-        }, 5000); // Throttle updates to every 5 seconds
+        localStorage.setItem('chat_last_activity', Date.now().toString());
+        throttleTimeout = setTimeout(() => { throttleTimeout = null; }, 5000);
       }
     };
 
@@ -75,52 +75,71 @@ function App() {
     };
   }, [sessionId]);
 
-  const handleLogin = (newSessionId: string, username: string) => {
-    const now = Date.now();
+  const handleLogin = (newSessionId: string, username: string, displayName?: string) => {
     setSessionId(newSessionId);
-    localStorage.setItem('chat_session_id', newSessionId);
-    localStorage.setItem('chat_last_activity', now.toString());
+    localStorage.setItem('chat_last_activity', Date.now().toString());
     localStorage.setItem('sidebar_visible', 'true');
-    // Store username so we can create new sessions under the correct user
+    // Store username for new-chat creation
     localStorage.setItem('chat_username', username);
+    localStorage.setItem('chat_display_name', displayName || username);
   };
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    try {
+      // Clear the server-side session cookie
+      await fetch('http://localhost:8000/api/v1/auth/logout', {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch (err) {
+      console.error('Logout request failed:', err);
+    }
     setSessionId(null);
-    localStorage.removeItem('chat_session_id');
     localStorage.removeItem('chat_last_activity');
     localStorage.removeItem('sidebar_visible');
     localStorage.removeItem('chat_username');
+    localStorage.removeItem('chat_display_name');
   };
 
-  const handleNewChat = async () => {
-    try {
-      const username = localStorage.getItem('chat_username') || 'user';
-      const res = await fetch('http://localhost:8000/sessions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ username, title: 'New Chat' })
-      });
-      const data = await res.json();
-      if (data.session_id) {
-        handleLogin(data.session_id, username);
-      }
-    } catch (e) {
-      console.error("Failed to start new chat", e);
-    }
+  // Called by Chat.tsx after it creates the new session (Chat knows the agentKey)
+  const handleNewChat = (newSessionId: string) => {
+    const username = localStorage.getItem('chat_username') || 'user';
+    const displayName = localStorage.getItem('chat_display_name') || username;
+    handleLogin(newSessionId, username, displayName);
+  };
+
+  const updateActivity = () => {
+    localStorage.setItem('chat_last_activity', Date.now().toString());
   };
 
   const handleSwitchSession = (id: string) => {
     setSessionId(id);
     updateActivity();
-    localStorage.setItem('chat_session_id', id);
   };
+
+  // Show nothing while we check the cookie (prevents login-page flash on refresh)
+  if (isCheckingAuth) {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        height: '100vh', background: '#0a0f1e', color: '#64748b',
+        fontSize: '0.9rem', gap: '12px',
+      }}>
+        <div style={{
+          width: '20px', height: '20px', border: '2px solid #1e293b',
+          borderTop: '2px solid #65a30d', borderRadius: '50%',
+          animation: 'spin 0.8s linear infinite',
+        }} />
+        Checking authentication...
+        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+      </div>
+    );
+  }
 
   return (
     <>
       {sessionId ? (
         <Chat
-          key={sessionId}
           sessionId={sessionId}
           onLogout={handleLogout}
           onActivity={updateActivity}
