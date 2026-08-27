@@ -1,0 +1,28 @@
+services:
+  api:
+    container_name: emarat-api
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: emarat-api:latest
+    env_file: .env
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+
+  frontend:
+    container_name: emarat-frontend
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        # Baked into the bundle at build time (import.meta.env.VITE_API_URL).
+        # Override for other environments with:
+        #   VITE_API_URL=https://<api-fqdn> docker compose build frontend
+        VITE_API_URL: ${VITE_API_URL:-http://localhost:8000}
+    image: emarat-frontend:latest
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+    restart: unless-stopped

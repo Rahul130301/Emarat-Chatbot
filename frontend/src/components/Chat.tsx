@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { Send, LogOut, Plus, PlaneTakeoff, Plane, Fuel, FileText, BarChart2, MessageSquare, ChevronDown, Layers, PanelLeftClose, PanelLeftOpen, MoreVertical, Trash2 } from 'lucide-react';
 
+const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+
 interface ChatProps {
   sessionId: string;
   onLogout: () => void;
@@ -411,13 +413,6 @@ const parseReasoning = (content: string): ReasoningStep[] => {
   return steps;
 };
 
-const getDeterministicLatency = (str: string, min: number, max: number) => {
-  let hash = 0;
-  for (let i = 0; i < str.length; i++) hash = str.charCodeAt(i) + ((hash << 5) - hash);
-  const normalized = Math.abs(hash % 1000) / 1000;
-  return (min + normalized * (max - min)).toFixed(1);
-};
-
 const TOOL_LABELS: Record<string, { title: string, desc: string, defaultReasoning: string }> = {
   resolve_entity: {
     title: 'Entity Resolution & Canonical Matching',
@@ -581,7 +576,6 @@ const ReasoningBlock = ({ content, isStreaming, todos, toolCalls }: { content: s
   const [isOpen, setIsOpen] = useState(false);
 
   const timelineItems = buildExecutionTimeline(content, isStreaming, todos, toolCalls);
-  const completedCount = timelineItems.filter(t => t.completed).length;
 
   return (
     <div className="reasoning-custom-block">
@@ -817,10 +811,6 @@ function moveSessionToFront(list: SessionMeta[], id: string): SessionMeta[] {
   return next;
 }
 
-function rememberAgentSession(agentKey: AgentKey, sessionId: string) {
-  localStorage.setItem(`last_session_${agentKey}`, sessionId);
-}
-
 interface AgentConfig {
   id: AgentType;
   name: string;
@@ -898,7 +888,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
 
   const createSessionOnServer = async (key: AgentKey = agentKey): Promise<string | null> => {
     const username = localStorage.getItem('chat_username') || 'user';
-    const res = await fetch('http://localhost:8000/sessions', {
+    const res = await fetch(`${API_BASE}/sessions`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -914,7 +904,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     const username = localStorage.getItem('chat_username') || '';
     try {
       await fetch(
-        `http://localhost:8000/sessions/${targetSessionId}?username=${encodeURIComponent(username)}`,
+        `${API_BASE}/sessions/${targetSessionId}?username=${encodeURIComponent(username)}`,
         { method: 'DELETE' }
       );
       const remaining = sessions.filter(s => s.id !== targetSessionId);
@@ -944,7 +934,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     (async () => {
       try {
         const res = await fetch(
-          `http://localhost:8000/sessions?username=${encodeURIComponent(username)}`
+          `${API_BASE}/sessions?username=${encodeURIComponent(username)}`
         );
         const data = await res.json();
         if (cancelled || !Array.isArray(data)) return;
@@ -953,7 +943,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
           data.map(async (s: any) => {
             if (!isEmptyChatTitle(s.title)) return s;
             try {
-              const hRes = await fetch(`http://localhost:8000/sessions/${s.id}/history`);
+              const hRes = await fetch(`${API_BASE}/sessions/${s.id}/history`);
               const msgs: any[] = await hRes.json();
               const firstUser = Array.isArray(msgs) ? msgs.find(m => m.role === 'user') : null;
               if (firstUser) {
@@ -993,7 +983,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     const welcome = currentConfig.welcomeMessage;
     setMessages([{ id: '1', text: welcome, sender: 'assistant' }]);
 
-    fetch(`http://localhost:8000/sessions/${sessionId}/history`)
+    fetch(`${API_BASE}/sessions/${sessionId}/history`)
       .then(r => r.json())
       .then((data: any[]) => {
         if (cancelled) return;
@@ -1079,7 +1069,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
           : s
       ));
       const username = localStorage.getItem('chat_username') || 'user';
-      fetch(`http://localhost:8000/sessions/${sessionId}/agent`, {
+      fetch(`${API_BASE}/sessions/${sessionId}/agent`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ username, agent_key: newKey }),
@@ -1142,8 +1132,8 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     // Capture the toggle position at send time
     const modeAtSend: 'reasoning' | 'fast' = reasoningMode ? 'reasoning' : 'fast';
     const endpoint = reasoningMode
-      ? 'http://localhost:8000/chat'
-      : 'http://localhost:8000/chat/fast';
+      ? `${API_BASE}/chat`
+      : `${API_BASE}/chat/fast`;
 
     try {
       const res = await fetch(endpoint, {
@@ -1255,7 +1245,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
   const handleLogoutClick = async () => {
     try {
       // Use SSO logout to clear the session cookie
-      await fetch('http://localhost:8000/api/v1/auth/logout', {
+      await fetch(`${API_BASE}/api/v1/auth/logout`, {
         method: 'POST',
         credentials: 'include',
       });

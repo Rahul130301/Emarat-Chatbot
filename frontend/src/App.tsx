@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import Login from './components/Login';
 import Chat from './components/Chat';
 
+const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
 const SESSION_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
 function App() {
@@ -12,7 +13,7 @@ function App() {
   useEffect(() => {
     const checkAuth = async () => {
       try {
-        const res = await fetch('http://localhost:8000/api/v1/auth/me', {
+        const res = await fetch(`${API_BASE}/api/v1/auth/me`, {
           credentials: 'include', // send the HTTP-only session cookie
         });
 
@@ -55,7 +56,7 @@ function App() {
   useEffect(() => {
     if (!sessionId) return;
 
-    let throttleTimeout: NodeJS.Timeout | null = null;
+    let throttleTimeout: ReturnType<typeof setTimeout> | null = null;
     const handleGlobalActivity = () => {
       if (!throttleTimeout) {
         localStorage.setItem('chat_last_activity', Date.now().toString());
@@ -87,7 +88,7 @@ function App() {
   const handleLogout = async () => {
     try {
       // Clear the server-side session cookie
-      await fetch('http://localhost:8000/api/v1/auth/logout', {
+      await fetch(`${API_BASE}/api/v1/auth/logout`, {
         method: 'POST',
         credentials: 'include',
       });

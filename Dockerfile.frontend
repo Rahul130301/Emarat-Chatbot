@@ -1,0 +1,36 @@
+# syntax=docker/dockerfile:1
+
+# ── Stage 1: Build the Vite/React bundle ─────────────────────────────────────
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Install dependencies first for better layer caching.
+# Uses npm ci when a lockfile is present, otherwise falls back to npm install.
+COPY frontend/package.json frontend/package-lock.json* ./
+RUN npm install
+
+COPY frontend/ .
+
+# VITE_API_URL is injected into import.meta.env.VITE_API_URL at BUILD TIME
+# (consumed by the API_BASE constant in the frontend source). It must point at
+# the deployed backend URL. Rebuild this image whenever that URL changes.
+ARG VITE_API_URL
+ENV VITE_API_URL=${VITE_API_URL}
+
+RUN npm run build   # tsc && vite build → outputs /app/dist
+
+# ── Stage 2: Serve static files with Nginx ───────────────────────────────────
+FROM nginx:1.27-alpine AS runtime
+
+COPY --from=builder /app/dist /usr/share/nginx/html
+
+# SPA fallback so client-side routes / refreshes resolve to index.html
+RUN printf 'server {\n\
+  listen 80;\n\
+  root /usr/share/nginx/html;\n\
+  index index.html;\n\
+  location / { try_files $uri $uri/ /index.html; }\n\
+}\n' > /etc/nginx/conf.d/default.conf
+
+EXPOSE 80

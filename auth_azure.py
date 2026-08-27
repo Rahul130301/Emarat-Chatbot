@@ -26,9 +26,10 @@ from session_store import sessions, SESSION_TIMEOUT, make_session_entry
 TENANT_ID     = os.environ.get("ALDAR_AZURE_TENANT_ID", "")
 CLIENT_ID     = os.environ.get("ALDAR_AZURE_CLIENT_ID", "")
 CLIENT_SECRET = os.environ.get("ALDAR_AZURE_CLIENT_SECRET", "")
-REDIRECT_URI  = os.environ.get("SSO_REDIRECT_URI",  "http://localhost:8000/api/v1/auth/azure-ad/callback")
-FRONTEND_URL  = os.environ.get("FRONTEND_URL", "http://localhost:5173")
-SECRET_KEY    = os.environ.get("SESSION_SECRET_KEY", "please-change-this-to-a-random-secret-32+chars")
+REDIRECT_URI    = os.environ.get("SSO_REDIRECT_URI",  "http://localhost:8000/api/v1/auth/azure-ad/callback")
+FRONTEND_URL    = os.environ.get("FRONTEND_URL", "http://localhost:5173")
+SECRET_KEY      = os.environ.get("SESSION_SECRET_KEY", "please-change-this-to-a-random-secret-32+chars")
+SECURE_COOKIES  = os.environ.get("SECURE_COOKIES", "false").lower() == "true"
 
 AUTHORITY  = f"https://login.microsoftonline.com/{TENANT_ID}"
 SCOPES     = ["openid", "profile", "email", "User.Read"]
@@ -70,7 +71,7 @@ async def azure_ad_login():
         httponly=True,
         max_age=600,
         samesite="lax",
-        secure=False,   # Set True in production (HTTPS)
+        secure=SECURE_COOKIES,
     )
     return resp
 
@@ -195,7 +196,7 @@ async def azure_ad_callback(
         httponly=True,       # Not accessible from JavaScript (security)
         max_age=SESSION_TIMEOUT,
         samesite="lax",
-        secure=False,        # Set True in production (HTTPS only)
+        secure=SECURE_COOKIES,
     )
     resp.delete_cookie("oauth_state")  # Clean up the CSRF state cookie
     return resp

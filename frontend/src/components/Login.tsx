@@ -1,10 +1,12 @@
 import { useState } from 'react';
 
+const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+
 interface LoginProps {
   onLogin: (sessionId: string, username: string, displayName?: string) => void;
 }
 
-export default function Login({ onLogin }: LoginProps) {
+export default function Login(_props: LoginProps) {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
@@ -13,7 +15,7 @@ export default function Login({ onLogin }: LoginProps) {
     setError('');
     // Full browser redirect — Microsoft sets cookies during the flow.
     // The backend /api/v1/auth/azure-ad/login will redirect to Microsoft login page.
-    window.location.href = 'http://localhost:8000/api/v1/auth/azure-ad/login';
+    window.location.href = `${API_BASE}/api/v1/auth/azure-ad/login`;
   };
 
   return (
