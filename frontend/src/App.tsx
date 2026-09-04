@@ -13,6 +13,24 @@ function App() {
   useEffect(() => {
     const checkAuth = async () => {
       try {
+        // 1. Check URL parameters passed from SSO redirect
+        const params = new URLSearchParams(window.location.search);
+        const ssoSessionId = params.get('session_id');
+        const ssoUsername = params.get('username');
+        const ssoDisplayName = params.get('display_name');
+
+        if (ssoSessionId && ssoUsername) {
+          handleLogin(ssoSessionId, ssoUsername, ssoDisplayName || ssoUsername);
+          // Register session in memory with backend
+          fetch(`${API_BASE}/sessions/register`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username: ssoUsername, session_id: ssoSessionId }),
+          }).catch(console.error);
+          return;
+        }
+
+        // 2. Otherwise check existing session cookie
         const res = await fetch(`${API_BASE}/api/v1/auth/me`, {
           credentials: 'include', // send the HTTP-only session cookie
         });
@@ -26,7 +44,7 @@ function App() {
       } catch (err) {
         console.error('Auth check failed:', err);
       } finally {
-        // Remove ?sso=ok from URL without triggering a reload
+        // Remove ?sso=ok and params from URL without triggering a reload
         if (window.location.search.includes('sso=ok')) {
           window.history.replaceState({}, '', window.location.pathname);
         }

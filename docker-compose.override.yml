@@ -1,0 +1,8 @@
+services:
+  api:
+    volumes:
+      # Mount the local SQLite catalogs so they are available inside the container during local testing
+      - ./catalog.db:/app/catalog.db:ro
+      - ./aviation_catalog.db:/app/aviation_catalog.db:ro
+    environment:
+      - FRONTEND_URL=http://localhost:3000

@@ -52,9 +52,11 @@ fenced code block. No text inside the block — raw JSON only.
   count, or average, whatever the question asked for. Never a percentage,
   never pre-scaled.
 - `"unit"` → the actual unit of the values, matching the domain you're in.
-  Use `"$"` for money, `"L"` for litres/fuel volume, `"%"` for a percentage
-  measure, `""` for a plain count. NEVER default to `"$"` for a non-money
-  metric — e.g. aviation fuel volume must use `"unit": "L"`, not `"$"`.
+  Use `"$"` for money, `"L"` for litres/fuel volume, `"USG"` for US Gallons
+  (when the user requested USG — values must already be converted from Litres
+  by dividing by 3.78541), `"%"` for a percentage measure, `""` for a plain
+  count. NEVER default to `"$"` for a non-money metric — e.g. aviation fuel
+  volume must use `"unit": "L"` (or `"unit": "USG"` if asked), not `"$"`.
 
 ### Rules
 

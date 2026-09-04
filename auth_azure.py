@@ -12,7 +12,7 @@ Endpoints:
 import os
 import time
 import uuid
-from urllib.parse import urlencode
+from urllib.parse import urlencode, quote
 
 import httpx
 from fastapi import APIRouter, Request, HTTPException
@@ -159,20 +159,13 @@ async def azure_ad_callback(
 
     print(f"SSO login: {display_name} ({username})")
 
-    # ── Create or resume Cosmos DB session ───────────────────────────────────
-    # Fetch any existing session (no agent_key filter — just to check if first-time user)
-    existing_sessions = await cosmos_db.get_user_sessions(user_id=username)
-
-    if existing_sessions:
-        # Resume the most recent session (from any agent)
-        session_id = existing_sessions[0]["id"]
-    else:
-        # First-time user — create a fresh session defaulting to contracts-fast
-        session_id = await cosmos_db.create_session(
-            user_id=username,
-            title="New Chat",
-            agent_key="contracts-fast"
-        )
+    # ── Create a fresh new chat window session on login ───────────────────────
+    # Previous chats remain saved and accessible in the Recent Chats section.
+    session_id = await cosmos_db.create_session(
+        user_id=username,
+        title="New Chat",
+        agent_key="contracts-fast"
+    )
 
     # Register in in-memory store (creates LLM agent objects lazily on first use)
     if session_id not in sessions:
@@ -189,7 +182,8 @@ async def azure_ad_callback(
     }
     signed_cookie = signer.dumps(session_payload)
 
-    resp = RedirectResponse(url=f"{FRONTEND_URL}?sso=ok", status_code=302)
+    redirect_url = f"{FRONTEND_URL}?sso=ok&session_id={quote(session_id)}&username={quote(username)}&display_name={quote(display_name)}"
+    resp = RedirectResponse(url=redirect_url, status_code=302)
     resp.set_cookie(
         key=COOKIE_NAME,
         value=signed_cookie,

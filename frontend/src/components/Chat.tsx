@@ -850,7 +850,7 @@ const AGENT_CONFIGS: Record<AgentType, AgentConfig> = {
     shortName: 'Aviation Agent',
     badge: 'AVIATION OPERATIONS',
     tagline: 'FLIGHT & UPLIFT OPERATIONS',
-    welcomeMessage: "Hello! I'm AVT, your Emarat Aviation Operations assistant. I'm trained on aircraft refueling operations, fuel uplifts (Litres), flight movements, airline consumption, and stand analytics.\n\nHow can I assist you with aviation data today?",
+    welcomeMessage: "Hello! I'm AVT, your Aviation intelligence assistant. I'm trained on jet fuel markets, contract data, uplift operations, and pricing analytics. How can I assist you today?",
     capabilities: [
       { icon: Fuel, label: 'Fuel uplift volumes (Litres)' },
       { icon: PlaneTakeoff, label: 'Flight movements & schedules' },
@@ -877,6 +877,36 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
   const [isAgentMenuOpen, setIsAgentMenuOpen] = useState(false);
 
   const currentConfig = AGENT_CONFIGS[activeAgent];
+
+  const MAX_CHAR_LIMIT = 2500;
+  const [showLimitWarning, setShowLimitWarning] = useState(false);
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = e.target.value;
+    if (val.length >= MAX_CHAR_LIMIT) {
+      setInput(val.slice(0, MAX_CHAR_LIMIT));
+      setShowLimitWarning(true);
+    } else {
+      setInput(val);
+      setShowLimitWarning(false);
+    }
+    onActivity();
+  };
+
+  const handleInputPaste = (e: React.ClipboardEvent<HTMLInputElement>) => {
+    const pastedText = e.clipboardData.getData('text');
+    if (!pastedText) return;
+    const target = e.target as HTMLInputElement;
+    const currentVal = target.value;
+    const selectionStart = target.selectionStart || 0;
+    const selectionEnd = target.selectionEnd || 0;
+    const proposedVal = currentVal.slice(0, selectionStart) + pastedText + currentVal.slice(selectionEnd);
+    if (proposedVal.length > MAX_CHAR_LIMIT) {
+      e.preventDefault();
+      setInput(proposedVal.slice(0, MAX_CHAR_LIMIT));
+      setShowLimitWarning(true);
+    }
+  };
 
   const [messages, setMessages] = useState<Message[]>([{ id: '1', text: currentConfig.welcomeMessage, sender: 'assistant' }]);
   const [sessions, setSessions] = useState<SessionMeta[]>([]);
@@ -939,7 +969,8 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
         const data = await res.json();
         if (cancelled || !Array.isArray(data)) return;
 
-        const enriched: SessionMeta[] = await Promise.all(
+        const currentActiveId = sessionIdRef.current || sessionId;
+        const enriched: (SessionMeta | null)[] = await Promise.all(
           data.map(async (s: any) => {
             if (!isEmptyChatTitle(s.title)) return s;
             try {
@@ -949,21 +980,27 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
               if (firstUser) {
                 return { ...s, title: firstUser.content.slice(0, 30) + (firstUser.content.length > 30 ? '...' : '') };
               }
+              // If no user messages exist and it's not the active session, filter out empty unused chat
+              if (s.id !== currentActiveId) {
+                return null;
+              }
             } catch (_) {}
             return s;
           })
         );
         if (cancelled) return;
 
+        const filteredEnriched = enriched.filter((s): s is SessionMeta => s !== null);
+
         setSessions(prev => {
           const optimisticTitles: Record<string, string> = {};
           prev.forEach(s => { if (!isEmptyChatTitle(s.title)) optimisticTitles[s.id] = s.title; });
-          const merged = enriched.map(s =>
+          const merged = filteredEnriched.map(s =>
             optimisticTitles[s.id] ? { ...s, title: optimisticTitles[s.id] } : s
           );
           const extras = prev.filter(s => !merged.some(m => m.id === s.id));
           const combined = [...extras, ...merged];
-          return moveSessionToFront(combined, sessionIdRef.current || sessionId);
+          return moveSessionToFront(combined, currentActiveId);
         });
       } catch (e) {
         if (!cancelled) console.error(e);
@@ -1103,6 +1140,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
 
     setMessages(prev => [...prev, userMessage]);
     setInput('');
+    setShowLimitWarning(false);
     setIsLoading(true);
 
     // Optimistically update the sidebar title on the FIRST user message.
@@ -1227,7 +1265,39 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
     sendMessage(input);
   };
 
+  const handleSelectSession = async (targetSession: SessionMeta) => {
+    if (targetSession.id === sessionId) return;
+
+    const currentMeta = sessions.find(s => s.id === sessionId);
+    const isCurrentEmpty = !messages.some(m => m.sender === 'user') && isEmptyChatTitle(currentMeta?.title);
+
+    // If current session is an unused empty "New Chat" tab and user switches directly to a saved recent chat,
+    // delete the unused empty session so it doesn't leave an empty "New Chat" tab in Recent Chats.
+    if (isCurrentEmpty) {
+      const username = localStorage.getItem('chat_username') || '';
+      fetch(`${API_BASE}/sessions/${sessionId}?username=${encodeURIComponent(username)}`, {
+        method: 'DELETE',
+      }).catch(console.error);
+
+      setSessions(prev => prev.filter(item => item.id !== sessionId));
+    }
+
+    if (targetSession.agent_key && targetSession.agent_key !== agentKey) {
+      setAgentKey(targetSession.agent_key);
+      localStorage.setItem('active_agent_key', targetSession.agent_key);
+    }
+
+    onSwitchSession(targetSession.id);
+  };
+
   const handleNewChatClick = async () => {
+    const currentMeta = sessions.find(s => s.id === sessionId);
+    const isCurrentEmpty = !messages.some(m => m.sender === 'user') && isEmptyChatTitle(currentMeta?.title);
+    if (isCurrentEmpty) {
+      // Already on a fresh new chat — reset view without creating duplicate empty sessions
+      setMessages([{ id: '1', text: currentConfig.welcomeMessage, sender: 'assistant' }]);
+      return;
+    }
     try {
       const newId = await createSessionOnServer();
       if (newId) {
@@ -1344,13 +1414,7 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                           <button
                             className={`history-button ${s.id === sessionId ? 'active' : ''}`}
                             style={{ flex: 1, paddingRight: '32px', minWidth: 0, flexDirection: 'column', alignItems: 'flex-start', gap: '2px' }}
-                            onClick={() => {
-                              if (s.agent_key && s.agent_key !== agentKey) {
-                                setAgentKey(s.agent_key);
-                                localStorage.setItem('active_agent_key', s.agent_key);
-                              }
-                              onSwitchSession(s.id);
-                            }}
+                            onClick={() => handleSelectSession(s)}
                           >
                             <span style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', width: '100%' }}>
                               <MessageSquare size={16} style={{ flexShrink: 0 }} />
@@ -1456,6 +1520,9 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
                 {activeAgent === 'aviation' ? <PlaneTakeoff size={16} color="white" /> : <FileText size={16} color="white" />}
               </div>
               <div className="header-title-col">
+                <div style={{ fontSize: '0.95rem', fontWeight: 700, color: '#f8fafc', letterSpacing: '0.01em', marginBottom: '2px' }}>
+                  AVT Aviation Intelligence
+                </div>
                 {/* Interactive Agent Selector Dropdown */}
                 <div style={{ position: 'relative' }}>
                   <button
@@ -1569,22 +1636,51 @@ export default function Chat({ sessionId, onLogout, onActivity, onNewChat, onSwi
           </div>
 
           <div className="chat-input-wrapper">
+            {showLimitWarning && (
+              <div style={{
+                margin: '0 0 8px 0',
+                padding: '6px 12px',
+                background: 'rgba(239, 68, 68, 0.15)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                borderRadius: '6px',
+                color: '#f87171',
+                fontSize: '0.78rem',
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+              }}>
+                <span style={{ fontWeight: 600 }}>Limit Reached:</span> Maximum character limit of 2,500 characters reached. Content beyond limit has been truncated.
+              </div>
+            )}
             <div className="chat-input-container">
               <form className="chat-form" onSubmit={handleSend}>
                 <input
                   type="text"
                   className="input"
                   value={input}
-                  onChange={(e) => {
-                    setInput(e.target.value);
-                    onActivity();
-                  }}
+                  maxLength={MAX_CHAR_LIMIT}
+                  onChange={handleInputChange}
+                  onPaste={handleInputPaste}
                   placeholder="Ask about fuel prices, contracts, uplifts..."
                   disabled={isLoading}
                 />
-                <button type="submit" className="send-btn" disabled={isLoading || !input.trim()}>
-                  <Send size={18} />
-                </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span
+                    style={{
+                      fontSize: '0.75rem',
+                      color: input.length >= MAX_CHAR_LIMIT ? '#f87171' : '#64748b',
+                      fontWeight: input.length >= MAX_CHAR_LIMIT ? 600 : 400,
+                      userSelect: 'none',
+                      fontVariantNumeric: 'tabular-nums',
+                    }}
+                    title={`${input.length} of ${MAX_CHAR_LIMIT} characters used`}
+                  >
+                    {input.length}/{MAX_CHAR_LIMIT}
+                  </span>
+                  <button type="submit" className="send-btn" disabled={isLoading || !input.trim()}>
+                    <Send size={18} />
+                  </button>
+                </div>
               </form>
             </div>
             <div className="chat-footer-text">

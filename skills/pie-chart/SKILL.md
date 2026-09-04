@@ -53,9 +53,11 @@ fenced code block. No other text inside the block — raw JSON only.
   the raw values. Formula: `round((this_item_value / sum_of_all_values) * 100, 1)`.
   This is NOT the same as `value`. Both fields must be present on every slice.
 - `"unit"` → the actual unit of the values, matching the domain you're in.
-  Use `"$"` for money, `"L"` for litres/fuel volume, `"%"` for a percentage
-  measure, `""` for a plain count. NEVER default to `"$"` for a non-money
-  metric — e.g. aviation fuel volume must use `"unit": "L"`, not `"$"`.
+  Use `"$"` for money, `"L"` for litres/fuel volume, `"USG"` for US Gallons
+  (when the user requested USG — values must already be converted from Litres
+  by dividing by 3.78541), `"%"` for a percentage measure, `""` for a plain
+  count. NEVER default to `"$"` for a non-money metric — e.g. aviation fuel
+  volume must use `"unit": "L"` (or `"unit": "USG"` if asked), not `"$"`.
 
 ### Rules
 
